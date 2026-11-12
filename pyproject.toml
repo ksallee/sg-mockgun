@@ -7,6 +7,9 @@ license = { file = "LICENSE" }
 requires-python = ">=3.9"
 dependencies = ["shotgun-api3>=3.10.5"]
 
+[project.scripts]
+sg-mockgun = "sg_mockgun.server:main"
+
 [dependency-groups]
 dev = ["pytest>=8"]
 

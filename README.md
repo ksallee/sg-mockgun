@@ -5,7 +5,7 @@ Mockgun, the in-memory Flow Production Tracking mock that ships inside
 with behaviour recorded by [sg-groundtruth](https://github.com/ksallee/sg-groundtruth).
 
 Status: `0.1.0`. Mockgun as vendored from shotgun_api3 3.10.5, upstream tests passing, plus a clean
-current schema, schema field writes and an event log.
+current schema, schema field writes, an event log, and an HTTP server a real client connects to.
 
 ## Why
 
@@ -69,6 +69,20 @@ entities the site enabled are dropped with their connection entities and every l
     from sg_mockgun import Shotgun, schemas
     Shotgun.set_schema_paths(*schemas.paths())
     sg = Shotgun("https://mock.example.com", script_name="x", api_key="y")
+
+## Serve
+
+    sg-mockgun serve --host 0.0.0.0 --port 8080
+
+    import shotgun_api3
+    sg = shotgun_api3.Shotgun("http://localhost:8080", script_name="any", api_key="any")
+
+One mockgun instance behind the api3 JSON protocol: `info`, `read` with paging, `create`, `update`,
+`delete`, `revive`, `batch` and the `schema_*` calls. Any script name and key are accepted, and the
+script name is the event log's user. Faults come back in the site's `exception` envelope; any other
+method answers `Error: API method "<name>" is not permitted.`, as a site does. Calls are serialised
+under one lock. State lives in memory; `sg_mockgun.server.make_server(mock)` serves an instance you
+have seeded yourself.
 
 ## Develop
 
