@@ -5,7 +5,7 @@ Mockgun, the in-memory Flow Production Tracking mock that ships inside
 with behaviour recorded by [sg-groundtruth](https://github.com/ksallee/sg-groundtruth).
 
 Status: `0.1.0`. Mockgun as vendored from shotgun_api3 3.10.5, upstream tests passing, plus a clean
-current schema.
+current schema and schema field writes.
 
 ## Why
 
@@ -19,9 +19,24 @@ meets those answers.
 
 Each behaviour comes from a corpus entry, never a guess.
 
-- `schema_field_create`, `schema_field_update`, `schema_field_delete`, `schema_field_revive`, with
-  the refusals the site answers with.
 - `EventLogEntry` records for every write.
+
+## Schema field writes
+
+`schema_field_create`, `schema_field_update` and `schema_field_delete` answer as a Flow PT 8.91 site
+answered over api3 (`docs/api3-probe-2026-11-12.md`), with `shotgun_api3.Fault` and the site's words:
+
+- The code is `sg_` + the lowercased display name, non-alphanumerics to `_`. `sg_foo` becomes `sg_sg_foo`.
+- A display name already taken by a live field is silently suffixed: `_1`, `_2`.
+- A deleted field's code stays taken. Creating it again, at any type, is refused, and api3 has no revive.
+- `data_type` cannot be updated. Only `name`, `visible`, `description`, `summary_default`,
+  `custom_metadata` and `unique` can.
+- `query`, `summary`, `color` and `image` cannot be created. `calculated` fails as it does with no
+  formula. `entity` and `multi_entity` need one `valid_types`; `checkbox` needs a boolean default.
+- Schema writes are per instance.
+
+Two answers are not recorded over api3 and say so in the code: a `valid_types` with several types
+uses the REST wording, and a `calculated` create carrying a formula is unmeasured.
 
 ## Bundled schema
 
