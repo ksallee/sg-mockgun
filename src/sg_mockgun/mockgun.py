@@ -125,6 +125,14 @@ from .schema import SchemaFactory
 from . import events as _events
 from .fields import CREATABLE_TYPES, UPDATABLE_PROPERTIES, field_code, new_field, ruby_inspect, ruby_list, ruby_params
 
+class FieldReviveError(ShotgunError):
+    """A refused field revive. ``status`` is the HTTP status the REST route answers with."""
+
+    def __init__(self, message, status):
+        ShotgunError.__init__(self, message)
+        self.status = status
+
+
 _RETIRED_FIELD = (
     "API schema_field_create() failed, there is a retired field with the same field_name: %s. "
     "Delete the retired field forever from the Trash Page in Shotgun and try again."
@@ -343,8 +351,26 @@ class Shotgun(object):
             )
         field = self._schema[entity_type].pop(field_name)
         self._retired_fields.setdefault(entity_type, {})[field_name] = field
+        when = self._retired_at[("field", entity_type, field_name)] = self._clock()
         self._log(_events.field_retired(
-            self._event_user["name"], self._column_id(entity_type, field_name), field_name, self._clock()))
+            self._event_user["name"], self._column_id(entity_type, field_name), field_name, when))
+        return True
+
+    def revive_field(self, entity_type, field_name):
+        """Bring a trashed field back as it was retired: original type, name and properties.
+
+        A site offers this over REST only (``POST /schema/<Type>/fields/<field>``, finding 040);
+        shotgun_api3 has no call for it. ``sg-mockgun serve`` exposes that route.
+        """
+        if field_name in self._schema.get(entity_type, {}):
+            raise FieldReviveError("Field %s.%s is not retired." % (entity_type, field_name), 400)
+        if field_name not in self._retired_fields.get(entity_type, {}):
+            raise FieldReviveError("Retired field %s.%s does not exist." % (entity_type, field_name), 404)
+        field = self._retired_fields[entity_type].pop(field_name)
+        self._schema[entity_type][field_name] = field
+        when = self._retired_at.pop(("field", entity_type, field_name), self._clock())
+        self._log(_events.field_revived(
+            self._event_user["name"], self._column_id(entity_type, field_name), field_name, when))
         return True
 
     def schema_entity_read(self):

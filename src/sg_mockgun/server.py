@@ -5,17 +5,25 @@
 
 Any script name and key are accepted; the script name becomes the event log's user. Calls run one
 at a time under a lock, so concurrent clients see a consistent site.
+
+Next to api3, the two REST routes a site needs for reviving a trashed field, which api3 cannot do:
+``POST /api/v1/auth/access_token`` (``client_credentials``, ``session_token``, ``refresh_token``)
+and ``POST /api/v1/schema/<Type>/fields/<field>`` with ``revive``. Answers from sg-groundtruth
+finding 040 and the endpoint cards post_auth_access_token and post_schema_type_fields_field.
 """
 
 import argparse
 import json
+import re
+import secrets
 import threading
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from shotgun_api3 import ShotgunError
 
 from . import wire
-from .mockgun import Shotgun
+from .mockgun import FieldReviveError, Shotgun
 from . import schemas
 
 SERVER_VERSION = [8, 91, 0]  # the site the bundled schema and the recorded answers come from
@@ -27,13 +35,21 @@ class Site:
     def __init__(self, mock):
         self.mock = mock
         self.lock = threading.Lock()
+        self.sessions = {}  # api3 session token -> script name
+        self.bearers = {}  # REST access token -> script name
+        self.refresh = {}  # REST refresh token -> script name
+
+    def _who(self, auth):
+        return (auth.get("script_name") or self.sessions.get(auth.get("session_token"))
+                or auth.get("user_login") or "mockgun")
 
     def call(self, method, auth, params):
         handler = getattr(self, "m_" + (method or ""), None)
         if handler is None:
             return wire.fault('Error: API method "%s" is not permitted.' % method)
         with self.lock:
-            self.mock._event_user["name"] = auth.get("script_name") or auth.get("user_login") or "mockgun"
+            self._caller = self._who(auth)
+            self.mock._event_user["name"] = self._caller
             try:
                 return {"results": wire.to_wire(handler(params or {}))}
             except ShotgunError as e:
@@ -43,6 +59,58 @@ class Site:
     def _data(self, entity_type, data):
         fields = self.mock._schema.get(entity_type, {})
         return {k: wire.to_python(v, fields.get(k, {}).get("data_type", {}).get("value")) for k, v in data.items()}
+
+    def m_get_session_token(self, params):
+        token = secrets.token_hex(16)
+        self.sessions[token] = self._caller
+        return {"session_id": token}
+
+    # REST: token endpoint and field revive. Each returns (status, body or None).
+    def rest_token(self, content_type, raw):
+        if not content_type.startswith("application/x-www-form-urlencoded"):
+            return 415, {"errors": [{"status": 415, "code": 103,
+                                     "title": "Unsupported Content-Type '%s'" % content_type.split(";")[0],
+                                     "source": {"content_type": "Content-Type must be one of: "
+                                                                "'application/x-www-form-urlencoded'"}}]}
+        form = dict(urllib.parse.parse_qsl(raw.decode("utf-8")))
+        grant = form.get("grant_type")
+        with self.lock:
+            if grant == "client_credentials":
+                if not form.get("client_id") or not form.get("client_secret"):
+                    return 400, rest_error(400, "Missing or invalid authentication arguments")
+                who = form["client_id"]
+            elif grant == "session_token":
+                who = self.sessions.get(form.get("session_token"))
+                if not who:
+                    return 400, rest_error(400, "Missing or invalid authentication arguments")
+            elif grant == "refresh_token":
+                who = self.refresh.get(form.get("refresh_token"))
+                if not who:
+                    return 400, rest_error(400, "Missing or invalid authentication arguments")
+            else:
+                return 400, rest_error(400, "Unsupported grant_type")
+            access, refresh = secrets.token_hex(16), secrets.token_hex(16)
+            self.bearers[access], self.refresh[refresh] = who, who
+        return 200, {"token_type": "Bearer", "access_token": access, "expires_in": 600, "refresh_token": refresh}
+
+    def rest_revive(self, bearer, entity_type, field_name, query, raw):
+        with self.lock:
+            who = self.bearers.get(bearer)
+        if not who:
+            return 401, rest_error(401, "Request rejected due to invalid credentials.")
+        body = json.loads(raw or b"{}") if raw else {}
+        revive = body.get("revive") if isinstance(body, dict) and "revive" in body else query.get("revive")
+        if revive is None:
+            return 400, {"errors": [{"status": 400, "code": 103, "source": {"revive": ["revive is missing"]}}]}
+        if revive not in (True, "true", "1", 1):
+            return 400, {"errors": [{"status": 400, "code": 103, "source": {"revive": ["revive must be true"]}}]}
+        with self.lock:
+            self.mock._event_user["name"] = who
+            try:
+                self.mock.revive_field(entity_type, field_name)
+            except FieldReviveError as e:
+                return e.status, rest_error(e.status, str(e))
+        return 204, None
 
     def m_info(self, params):
         return {"version": SERVER_VERSION, "s3_uploads_enabled": False, "totango_site_id": None}
@@ -124,25 +192,49 @@ class Site:
         return self.mock.schema_field_delete(params["type"], params["field_name"])
 
 
+def rest_error(status, title):
+    # Status and title are recorded; the site's numeric "code" for these is not, so it is left out.
+    return {"errors": [{"status": status, "title": title}]}
+
+
+_FIELD_PATH = re.compile(r"^/api/v1(?:\.1)?/schema/([^/]+)/fields/([^/]+)$")
+
+
 def make_server(mock, host="127.0.0.1", port=8080):
     site = Site(mock)
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
-        def do_POST(self):
-            length = int(self.headers.get("content-length") or 0)
-            try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
-                body = site.call(*wire.split_payload(payload))
-            except Exception as e:  # malformed request: answer like a server error, keep serving
-                body = wire.fault("API %s" % e)
-            data = json.dumps(body).encode("utf-8")
-            self.send_response(200)
-            self.send_header("content-type", "application/json; charset=utf-8")
+        def _send(self, status, body):
+            data = b"" if body is None else json.dumps(body).encode("utf-8")
+            self.send_response(status)
+            if body is not None:
+                self.send_header("content-type", "application/json; charset=utf-8")
             self.send_header("content-length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+
+        def do_POST(self):
+            length = int(self.headers.get("content-length") or 0)
+            raw = self.rfile.read(length) if length else b""
+            parsed = urllib.parse.urlsplit(self.path)
+            path, query = parsed.path, dict(urllib.parse.parse_qsl(parsed.query))
+            if path.startswith("/api/v1"):
+                if path.rstrip("/").endswith("/auth/access_token"):
+                    return self._send(*site.rest_token(self.headers.get("content-type", ""), raw))
+                m = _FIELD_PATH.match(path)
+                if m:
+                    auth = self.headers.get("authorization", "")
+                    bearer = auth[7:] if auth.lower().startswith("bearer ") else ""
+                    return self._send(*site.rest_revive(bearer, m.group(1), m.group(2), query, raw))
+                # Only the revive route is served; the rest of REST is out of scope for this mock.
+                return self._send(404, rest_error(404, "Not served by sg-mockgun: %s" % path))
+            try:
+                body = site.call(*wire.split_payload(json.loads(raw or b"{}")))
+            except Exception as e:  # malformed request: answer like a server error, keep serving
+                body = wire.fault("API %s" % e)
+            self._send(200, body)
 
         def log_message(self, *args):
             pass
