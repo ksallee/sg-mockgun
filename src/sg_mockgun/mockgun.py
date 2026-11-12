@@ -114,13 +114,20 @@ Below is a non-exhaustive list of things that we still need to implement:
 
 """
 
+import copy
 import datetime
 from typing import Any
 
-from shotgun_api3 import ShotgunError
+from shotgun_api3 import Fault, ShotgunError
 from shotgun_api3.shotgun import _Config
 from .errors import MockgunError
 from .schema import SchemaFactory
+from .fields import CREATABLE_TYPES, UPDATABLE_PROPERTIES, field_code, new_field, ruby_inspect, ruby_list, ruby_params
+
+_RETIRED_FIELD = (
+    "API schema_field_create() failed, there is a retired field with the same field_name: %s. "
+    "Delete the retired field forever from the Trash Page in Shotgun and try again."
+)
 
 # ----------------------------------------------------------------------------
 # Version
@@ -202,7 +209,12 @@ class Shotgun(object):
                                "Before creating a Mockgun instance, please call Mockgun.set_schema_paths() "
                                "in order to specify which Flow Production Tracking schema Mockgun should operate against.")
 
-        self._schema, self._schema_entity = SchemaFactory.get_schemas(schema_path, schema_entity_path)
+        # SchemaFactory caches one schema for every instance; copy it so schema writes stay per instance.
+        schema, schema_entity = SchemaFactory.get_schemas(schema_path, schema_entity_path)
+        self._schema = copy.deepcopy(schema)
+        self._schema_entity = copy.deepcopy(schema_entity)
+        # Fields deleted through schema_field_delete: their programmatic names stay taken.
+        self._retired_fields = {}
 
         # initialize the "database"
         self._db = dict((entity, {}) for entity in self._schema)
@@ -229,22 +241,103 @@ class Shotgun(object):
         return self._schema
 
     def schema_field_create(self, entity_type, data_type, display_name, properties=None):
-        raise NotImplementedError
+        properties = dict(properties or {})
+        params = {
+            "type": entity_type,
+            "data_type": data_type,
+            "properties": [{"property_name": "name", "value": display_name}]
+            + [{"property_name": k, "value": v} for k, v in properties.items()],
+        }
+        if entity_type not in self._schema:
+            raise Fault(
+                "API schema_field_create() invalid/missing string entity 'type':\n%s\nValid entity types:\n%s"
+                % (ruby_params(params), ruby_list(sorted(self._schema)))
+            )
+        if data_type not in CREATABLE_TYPES:
+            raise Fault(
+                "API schema_field_create() can't create '%s' data type.  Valid data types:\n%s"
+                % (data_type, ruby_list(CREATABLE_TYPES))
+            )
+        if data_type == "calculated":
+            # Recorded with no formula. A create that carries one has not been measured.
+            raise Fault("API schema_field_create() NoMethodError: undefined method 'strip' for nil")
+        if data_type in ("entity", "multi_entity"):
+            valid_types = properties.get("valid_types")
+            if not valid_types:
+                raise Fault("API schema_field_create() missing required 'properties' [\"valid_types\"]")
+            if len(valid_types) != 1:
+                # REST wording (sg-groundtruth finding 019); the api3 answer has not been recorded.
+                raise Fault("API schema_field_create() 'valid_types' value expected Array with one element")
+        if data_type == "checkbox" and not isinstance(properties.get("default_value"), bool):
+            raise Fault("API schema_field_create() Crud::ParameterError: Only true or false allowed in checkbox")
 
-    def schema_field_update(self, entity_type, field_name, properties):
-        raise NotImplementedError
+        live = self._schema[entity_type]
+        retired = self._retired_fields.get(entity_type, {})
+        base = code = field_code(display_name)
+        suffix = 0
+        while code in live or code in retired:
+            if code in retired:
+                raise Fault(_RETIRED_FIELD % code)
+            suffix += 1
+            code = "%s_%d" % (base, suffix)
+
+        field = new_field(entity_type, data_type, display_name, properties)
+        live[code] = field
+        default = [] if data_type == "multi_entity" else field["properties"]["default_value"]["value"]
+        for row in self._db[entity_type].values():
+            row[code] = copy.deepcopy(default)
+        return code
+
+    def schema_field_update(self, entity_type, field_name, properties, project_entity=None):
+        properties = dict(properties or {})
+        params = {
+            "type": entity_type,
+            "field_name": field_name,
+            "properties": [{"property_name": k, "value": v} for k, v in properties.items()],
+        }
+        if field_name not in self._schema.get(entity_type, {}):
+            raise Fault(
+                "API schema_field_update() %s.%s doesn't exist:\n%s" % (entity_type, field_name, ruby_params(params))
+            )
+        if not properties:
+            raise Fault("API schema_field_update() can't create/update with no 'properties':\n[]")
+        for key, value in properties.items():
+            if key not in UPDATABLE_PROPERTIES:
+                raise Fault(
+                    "API schema_field_update() invalid property '%s':\n%s\nValid property names:\n%s"
+                    % (key, ruby_inspect({"property_name": key, "value": value}), ruby_list(UPDATABLE_PROPERTIES))
+                )
+        field = self._schema[entity_type][field_name]
+        for key, value in properties.items():
+            if key == "summary_default":
+                field["properties"].setdefault("summary_default", {"value": None, "editable": True})["value"] = value
+            else:
+                field[key]["value"] = value
+        return True
 
     def schema_field_delete(self, entity_type, field_name):
-        raise NotImplementedError
+        if field_name not in self._schema.get(entity_type, {}):
+            raise Fault(
+                "API schema_field_delete() %s.%s doesn't exist:\n%s"
+                % (entity_type, field_name, ruby_params({"type": entity_type, "field_name": field_name}))
+            )
+        field = self._schema[entity_type].pop(field_name)
+        self._retired_fields.setdefault(entity_type, {})[field_name] = field
+        return True
 
     def schema_entity_read(self):
         return self._schema_entity
 
-    def schema_field_read(self, entity_type, field_name=None):
+    def schema_field_read(self, entity_type, field_name=None, project_entity=None):
+        self._validate_entity_type(entity_type)
         if field_name is None:
             return self._schema[entity_type]
-        else:
-            return dict((k, v) for k, v in self._schema[entity_type].items() if k == field_name)
+        if field_name not in self._schema[entity_type]:
+            raise Fault(
+                "API schema_field_read() %s.%s doesn't exist:\n%s"
+                % (entity_type, field_name, ruby_params({"type": entity_type, "field_name": field_name}))
+            )
+        return {field_name: self._schema[entity_type][field_name]}
 
     def find(
         self, entity_type, filters, fields=None, order=None, filter_operator=None,
