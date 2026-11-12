@@ -114,13 +114,21 @@ Below is a non-exhaustive list of things that we still need to implement:
 
 """
 
+import copy
 import datetime
 from typing import Any
 
-from shotgun_api3 import ShotgunError
+from shotgun_api3 import Fault, ShotgunError
 from shotgun_api3.shotgun import _Config
 from .errors import MockgunError
 from .schema import SchemaFactory
+from . import events as _events
+from .fields import CREATABLE_TYPES, UPDATABLE_PROPERTIES, field_code, new_field, ruby_inspect, ruby_list, ruby_params
+
+_RETIRED_FIELD = (
+    "API schema_field_create() failed, there is a retired field with the same field_name: %s. "
+    "Delete the retired field forever from the Trash Page in Shotgun and try again."
+)
 
 # ----------------------------------------------------------------------------
 # Version
@@ -202,10 +210,23 @@ class Shotgun(object):
                                "Before creating a Mockgun instance, please call Mockgun.set_schema_paths() "
                                "in order to specify which Flow Production Tracking schema Mockgun should operate against.")
 
-        self._schema, self._schema_entity = SchemaFactory.get_schemas(schema_path, schema_entity_path)
+        # SchemaFactory caches one schema for every instance; copy it so schema writes stay per instance.
+        schema, schema_entity = SchemaFactory.get_schemas(schema_path, schema_entity_path)
+        self._schema = copy.deepcopy(schema)
+        self._schema_entity = copy.deepcopy(schema_entity)
+        # Fields deleted through schema_field_delete: their programmatic names stay taken.
+        self._retired_fields = {}
 
         # initialize the "database"
         self._db = dict((entity, {}) for entity in self._schema)
+
+        # The event log. Like an ApiUser's generate_event_log_entries (sg-groundtruth finding 049), but
+        # on by default so a test sees its writes logged unless it says otherwise.
+        self.generate_event_log_entries = True
+        self._clock = lambda: datetime.datetime.now(datetime.timezone.utc)
+        self._event_user = {"type": "ApiUser", "id": 1, "name": script_name or login or "mockgun"}
+        self._column_ids = {}
+        self._retired_at = {}
 
         # set some basic public members that exist in the Shotgun API
         self.base_url = base_url
@@ -222,6 +243,10 @@ class Shotgun(object):
     ###################################################################################################
     # public API methods
 
+    def set_clock(self, clock):
+        """Make event timestamps deterministic: ``clock`` returns a timezone-aware datetime."""
+        self._clock = clock
+
     def get_session_token(self):
         return "bogus_session_token"
 
@@ -229,22 +254,112 @@ class Shotgun(object):
         return self._schema
 
     def schema_field_create(self, entity_type, data_type, display_name, properties=None):
-        raise NotImplementedError
+        properties = dict(properties or {})
+        params = {
+            "type": entity_type,
+            "data_type": data_type,
+            "properties": [{"property_name": "name", "value": display_name}]
+            + [{"property_name": k, "value": v} for k, v in properties.items()],
+        }
+        if entity_type not in self._schema:
+            raise Fault(
+                "API schema_field_create() invalid/missing string entity 'type':\n%s\nValid entity types:\n%s"
+                % (ruby_params(params), ruby_list(sorted(self._schema)))
+            )
+        if data_type not in CREATABLE_TYPES:
+            raise Fault(
+                "API schema_field_create() can't create '%s' data type.  Valid data types:\n%s"
+                % (data_type, ruby_list(CREATABLE_TYPES))
+            )
+        if data_type == "calculated":
+            # Recorded with no formula. A create that carries one has not been measured.
+            raise Fault("API schema_field_create() NoMethodError: undefined method 'strip' for nil")
+        if data_type in ("entity", "multi_entity"):
+            valid_types = properties.get("valid_types")
+            if not valid_types:
+                raise Fault("API schema_field_create() missing required 'properties' [\"valid_types\"]")
+            if len(valid_types) != 1:
+                # REST wording (sg-groundtruth finding 019); the api3 answer has not been recorded.
+                raise Fault("API schema_field_create() 'valid_types' value expected Array with one element")
+        if data_type == "checkbox" and not isinstance(properties.get("default_value"), bool):
+            raise Fault("API schema_field_create() Crud::ParameterError: Only true or false allowed in checkbox")
 
-    def schema_field_update(self, entity_type, field_name, properties):
-        raise NotImplementedError
+        live = self._schema[entity_type]
+        retired = self._retired_fields.get(entity_type, {})
+        base = code = field_code(display_name)
+        suffix = 0
+        while code in live or code in retired:
+            if code in retired:
+                raise Fault(_RETIRED_FIELD % code)
+            suffix += 1
+            code = "%s_%d" % (base, suffix)
+
+        field = new_field(entity_type, data_type, display_name, properties)
+        live[code] = field
+        default = [] if data_type == "multi_entity" else field["properties"]["default_value"]["value"]
+        for row in self._db[entity_type].values():
+            row[code] = copy.deepcopy(default)
+        column_id = self._column_ids[(entity_type, code)] = len(self._column_ids) + 1
+        self._log(_events.field_created(self._event_user["name"], column_id, code))
+        return code
+
+    def schema_field_update(self, entity_type, field_name, properties, project_entity=None):
+        properties = dict(properties or {})
+        params = {
+            "type": entity_type,
+            "field_name": field_name,
+            "properties": [{"property_name": k, "value": v} for k, v in properties.items()],
+        }
+        if field_name not in self._schema.get(entity_type, {}):
+            raise Fault(
+                "API schema_field_update() %s.%s doesn't exist:\n%s" % (entity_type, field_name, ruby_params(params))
+            )
+        if not properties:
+            raise Fault("API schema_field_update() can't create/update with no 'properties':\n[]")
+        for key, value in properties.items():
+            if key not in UPDATABLE_PROPERTIES:
+                raise Fault(
+                    "API schema_field_update() invalid property '%s':\n%s\nValid property names:\n%s"
+                    % (key, ruby_inspect({"property_name": key, "value": value}), ruby_list(UPDATABLE_PROPERTIES))
+                )
+        field = self._schema[entity_type][field_name]
+        old_name = field["name"]["value"]
+        for key, value in properties.items():
+            if key == "summary_default":
+                field["properties"].setdefault("summary_default", {"value": None, "editable": True})["value"] = value
+            else:
+                field[key]["value"] = value
+        if field["name"]["value"] != old_name:
+            self._log(_events.field_renamed(
+                self._event_user["name"], self._column_id(entity_type, field_name), field_name,
+                old_name, field["name"]["value"]))
+        return True
 
     def schema_field_delete(self, entity_type, field_name):
-        raise NotImplementedError
+        if field_name not in self._schema.get(entity_type, {}):
+            raise Fault(
+                "API schema_field_delete() %s.%s doesn't exist:\n%s"
+                % (entity_type, field_name, ruby_params({"type": entity_type, "field_name": field_name}))
+            )
+        field = self._schema[entity_type].pop(field_name)
+        self._retired_fields.setdefault(entity_type, {})[field_name] = field
+        self._log(_events.field_retired(
+            self._event_user["name"], self._column_id(entity_type, field_name), field_name, self._clock()))
+        return True
 
     def schema_entity_read(self):
         return self._schema_entity
 
-    def schema_field_read(self, entity_type, field_name=None):
+    def schema_field_read(self, entity_type, field_name=None, project_entity=None):
+        self._validate_entity_type(entity_type)
         if field_name is None:
             return self._schema[entity_type]
-        else:
-            return dict((k, v) for k, v in self._schema[entity_type].items() if k == field_name)
+        if field_name not in self._schema[entity_type]:
+            raise Fault(
+                "API schema_field_read() %s.%s doesn't exist:\n%s"
+                % (entity_type, field_name, ruby_params({"type": entity_type, "field_name": field_name}))
+            )
+        return {field_name: self._schema[entity_type][field_name]}
 
     def find(
         self, entity_type, filters, fields=None, order=None, filter_operator=None,
@@ -404,6 +519,17 @@ class Shotgun(object):
 
         self._db[entity_type][next_id] = row
 
+        if entity_type != "EventLogEntry":
+            changes = [
+                (field, self._display_name(entity_type, field), self._get_field_type(entity_type, field), row[field])
+                for field in data
+                if row.get(field) not in (None, [])
+            ]
+            self._log(
+                _events.entity_created(self._event_user["name"], entity_type, next_id, self._row_name(row), changes),
+                row,
+            )
+
         if return_fields is None:
             result = dict((field, self._get_field_from_row(entity_type, row, field)) for field in data)
         else:
@@ -420,7 +546,17 @@ class Shotgun(object):
         self._validate_entity_exists(entity_type, entity_id)
 
         row = self._db[entity_type][entity_id]
+        before = dict((field, copy.deepcopy(row.get(field))) for field in data)
         self._update_row(entity_type, row, data, multi_entity_update_modes)
+        if entity_type != "EventLogEntry":
+            rows = []
+            for field in data:
+                if row.get(field) != before[field]:
+                    rows += [_events.attribute_change(
+                        self._event_user["name"], entity_type, entity_id, self._row_name(row), field,
+                        self._display_name(entity_type, field), self._get_field_type(entity_type, field),
+                        before[field], row.get(field))]
+            self._log(rows, row)
 
         return [dict((field, item) for field, item in row.items() if field in data or field in ("type", "id"))]
 
@@ -431,6 +567,17 @@ class Shotgun(object):
         row = self._db[entity_type][entity_id]
         if not row["__retired"]:
             row["__retired"] = True
+            if entity_type != "EventLogEntry":
+                when = self._retired_at[(entity_type, entity_id)] = self._clock()
+                # A delete drops the entity link from every earlier row for it (finding 049).
+                link = {"type": entity_type, "id": entity_id}
+                for event in self._db.get("EventLogEntry", {}).values():
+                    if event.get("entity") == link:
+                        event["entity"] = None
+                self._log(
+                    _events.entity_retired(self._event_user["name"], entity_type, entity_id, self._row_name(row), when),
+                    row, linked=False,
+                )
             return True
         else:
             return False
@@ -442,6 +589,12 @@ class Shotgun(object):
         row = self._db[entity_type][entity_id]
         if row["__retired"]:
             row["__retired"] = False
+            if entity_type != "EventLogEntry":
+                when = self._retired_at.pop((entity_type, entity_id), self._clock())
+                self._log(
+                    _events.entity_revived(self._event_user["name"], entity_type, entity_id, self._row_name(row), when),
+                    row,
+                )
             return True
         else:
             return False
@@ -460,6 +613,44 @@ class Shotgun(object):
 
     ###################################################################################################
     # internal methods and members
+
+    def _log(self, rows, source=None, linked=True):
+        """Append event rows, filling id, entity, project, user and created_at."""
+        if not rows or not self.generate_event_log_entries or "EventLogEntry" not in self._db:
+            return
+        table = self._db["EventLogEntry"]
+        now = self._clock()
+        for partial in rows:
+            event = self._get_new_row("EventLogEntry")
+            event.update(partial)
+            event_id = max(table) + 1 if table else 1
+            event["id"] = event_id
+            event["user"] = dict(self._event_user)
+            event["created_at"] = now
+            if source is not None:
+                event["entity"] = {"type": source["type"], "id": source["id"]} if linked else None
+                project = source.get("project")
+                event["project"] = {"type": project["type"], "id": project["id"]} if project else None
+            table[event_id] = event
+
+    def _column_id(self, entity_type, field_name):
+        key = (entity_type, field_name)
+        if key not in self._column_ids:
+            self._column_ids[key] = len(self._column_ids) + 1
+        return self._column_ids[key]
+
+    def _display_name(self, entity_type, field):
+        try:
+            return self._schema[entity_type][field]["name"]["value"]
+        except KeyError:
+            return field
+
+    @staticmethod
+    def _row_name(row):
+        for field in ("code", "name", "content", "title"):
+            if row.get(field):
+                return row[field]
+        return None
 
     def _validate_entity_type(self, entity_type):
         if entity_type not in self._schema:
