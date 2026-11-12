@@ -120,3 +120,22 @@ def field_retired(user, column_id, code, when):
             ' retired DisplayColumn "%s"' % code,
         ),
     ]
+
+
+def field_revived(user, column_id, code, retired_at):
+    date = stamp(retired_at)
+    return [
+        _row(
+            "Shotgun_DisplayColumn_Change",
+            {"type": "attribute_change", "attribute_name": "retirement_date", "entity_type": "DisplayColumn",
+             "entity_id": column_id, "old_value": date, "new_value": None},
+            '%s changed "Retirement Date" from "%s" to "" on Field %s' % (user, date, code),
+            "retirement_date",
+        ),
+        _row(
+            "Shotgun_DisplayColumn_Revival",
+            {"class_name": "DisplayColumn", "display_name": code, "id": column_id, "entity_type": "DisplayColumn",
+             "entity_id": column_id, "type": "entity_revival"},
+            ' revived DisplayColumn "%s"' % code,
+        ),
+    ]

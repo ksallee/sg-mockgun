@@ -81,7 +81,16 @@ One mockgun instance behind the api3 JSON protocol: `info`, `read` with paging, 
 `delete`, `revive`, `batch` and the `schema_*` calls. Any script name and key are accepted, and the
 script name is the event log's user. Faults come back in the site's `exception` envelope; any other
 method answers `Error: API method "<name>" is not permitted.`, as a site does. Calls are serialised
-under one lock. State lives in memory; `sg_mockgun.server.make_server(mock)` serves an instance you
+under one lock.
+
+Next to api3 it serves the two REST routes a site needs to revive a trashed field, which api3
+cannot do: `POST /api/v1/auth/access_token` (`client_credentials` with the script name and key,
+`session_token` from `sg.get_session_token()`, `refresh_token`; form-encoded only) and
+`POST /api/v1/schema/<Type>/fields/<field>` with `revive` true, in the body or the query. The field
+comes back at its original type. Answers from sg-groundtruth finding 040 and its endpoint cards;
+any other REST path is a 404. In-process, `sg.revive_field(entity_type, code)` does the same.
+
+State lives in memory; `sg_mockgun.server.make_server(mock)` serves an instance you
 have seeded yourself.
 
 ## Develop
