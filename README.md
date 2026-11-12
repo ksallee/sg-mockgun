@@ -5,7 +5,7 @@ Mockgun, the in-memory Flow Production Tracking mock that ships inside
 with behaviour recorded by [sg-groundtruth](https://github.com/ksallee/sg-groundtruth).
 
 Status: `0.1.0`. Mockgun as vendored from shotgun_api3 3.10.5, upstream tests passing, plus a clean
-current schema and schema field writes.
+current schema, schema field writes and an event log.
 
 ## Why
 
@@ -15,11 +15,22 @@ raises `NotImplementedError` on `schema_field_create`, `schema_field_update` and
 deleted field's name taken and records every write in the event log. Code tested on mockgun never
 meets those answers.
 
-## Planned
+## Event log
 
-Each behaviour comes from a corpus entry, never a guess.
+Every create, update, delete, revive and schema field write adds `EventLogEntry` rows shaped as the
+site writes them (`docs/api3-probe-2026-11-12.md`, findings 025 and 049), queryable with `find`:
 
-- `EventLogEntry` records for every write.
+- A create logs `Shotgun_<Type>_New`, then one `_Change` per field it set, with `in_create: true`.
+- An update logs one `_Change` per field whose value changed, `meta.old_value` and `meta.new_value`.
+- A delete logs a `retirement_date` change and `_Retirement`, and drops the `entity` link from every
+  earlier row for that entity; `meta.entity_id` keeps the trail. A revive logs the reverse and `_Revival`.
+- Field create, rename and delete log `Shotgun_DisplayColumn_*` rows.
+
+`sg.generate_event_log_entries = False` turns logging off, as the ApiUser flag does on a site (default
+on here, off on a site). `sg.set_clock(fn)` makes timestamps deterministic.
+
+Not modelled: server-set defaults logged on create, the internal `properties` row a rename also
+writes, and event ids that a site reserves ahead and commits late (finding 025).
 
 ## Schema field writes
 
