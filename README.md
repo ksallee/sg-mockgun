@@ -62,6 +62,10 @@ entities the site enabled are dropped with their connection entities and every l
 
 `tools/pull_schema.py` pulls and cleans a schema from any site, read-only.
 
+`schemas.paths("upstream_3_10_5")` is Autodesk's own test schema from shotgun_api3 3.10.5, as
+published in its repository under BSD-3. Older (77 entity types, 1035 fields, no `visible` key), but
+it ships with the client's own licence and covers the common production entities.
+
 ## Use
 
     pip install sg-mockgun
