@@ -139,3 +139,14 @@ def field_revived(user, column_id, code, retired_at):
             ' revived DisplayColumn "%s"' % code,
         ),
     ]
+
+
+def links_change(user, entity_type, entity_id, name, attribute, display, added, removed, in_create=False):
+    """A multi_entity change logged as the links added and removed (finding 090)."""
+    meta = {"type": "attribute_change", "attribute_name": attribute, "entity_type": entity_type, "entity_id": entity_id}
+    if in_create:
+        meta["in_create"] = True
+    meta.update({"field_data_type": "multi_entity", "added": added, "removed": removed, "platform_id": None})
+    description = '%s changed "%s" on %s %s: added %s, removed %s' % (
+        user, display, entity_type, name or "", _shown(added), _shown(removed))
+    return _row("Shotgun_%s_Change" % entity_type, meta, description, attribute)

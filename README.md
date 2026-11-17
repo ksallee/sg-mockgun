@@ -34,6 +34,22 @@ on here, off on a site). `sg.set_clock(fn)` makes timestamps deterministic.
 Not modelled: server-set defaults logged on create, the internal `properties` row a rename also
 writes, and event ids that a site reserves ahead and commits late (finding 025).
 
+## Task Templates and scheduling
+
+A create or a changed `task_template` applies the template from the TaskTemplate and its template
+Tasks in the mock (`docs/api3/070` to `074`). Seed them with `create` or `load`.
+
+- Missing template Tasks are created with `template_task` set. Linked Tasks are re-synced. Edges are
+  rewired. No Task is removed.
+- `duration` counts working days at 480 minutes. Downstream Tasks reschedule on an edge or an
+  upstream date write. A `start_date` write pins a dependent. `dependency_violation` is read only.
+- Deleting a Task retires its TaskDependency rows. Reviving it restores them.
+
+`sg.set_work_week([True] * 5 + [False] * 2)` sets the working days, Monday first (default Mon to Fri).
+
+Not modelled: event rows for rescheduled dates and re-synced fields, the dependency loop, duplicate
+and type refusals.
+
 ## Schema field writes
 
 `schema_field_create`, `schema_field_update` and `schema_field_delete` answer as a Flow PT 8.91 site

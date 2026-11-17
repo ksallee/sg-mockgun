@@ -131,6 +131,8 @@ from . import attention as _attention
 from . import events as _events
 from . import media as _media
 from . import seed as _seed
+from . import scheduling as _scheduling
+from . import taskflow as _taskflow
 from . import writes as _writes
 from . import reads as _reads
 import shotgun_api3.shotgun as _api3
@@ -270,6 +272,8 @@ class Shotgun(object):
         self._column_ids = {}
         self._retired_at = {}
         self._media_state = _media.new_state()
+        # The studio work week, Monday first (finding 047). Scheduling counts working days on it.
+        self.work_week = _scheduling.DEFAULT_WORK_WEEK
 
         # set some basic public members that exist in the Shotgun API
         self.base_url = base_url
@@ -285,6 +289,10 @@ class Shotgun(object):
 
     ###################################################################################################
     # public API methods
+
+    def set_work_week(self, days):
+        """Set the studio work week: seven booleans, Monday first, True for a working day."""
+        self.work_week = tuple(bool(d) for d in days)
 
     def set_clock(self, clock):
         """Make event timestamps deterministic: ``clock`` returns a timezone-aware datetime."""
@@ -682,6 +690,7 @@ class Shotgun(object):
                 _events.entity_created(self._event_user["name"], entity_type, next_id, self._row_name(row), changes),
                 row,
             )
+        _taskflow.after_create(self, entity_type, row, data)
 
         if return_fields is None:
             result = dict((field, self._read_field(entity_type, row, field)) for field in data)
@@ -697,6 +706,7 @@ class Shotgun(object):
         self._validate_entity_type(entity_type)
         data = self._validate_entity_data(entity_type, data)
         self._validate_entity_exists(entity_type, entity_id)
+        _taskflow.before_update(self, entity_type, data)
 
         row = self._db[entity_type][entity_id]
         before = dict((field, copy.deepcopy(row.get(field))) for field in data)
@@ -710,6 +720,7 @@ class Shotgun(object):
                         self._display_name(entity_type, field), self._get_field_type(entity_type, field),
                         before[field], row.get(field))]
             self._log(rows, row)
+        _taskflow.after_update(self, entity_type, row, data, before)
 
         result = dict((field, self._read_field(entity_type, row, field)) for field in data)
         result["type"] = row["type"]
@@ -734,6 +745,7 @@ class Shotgun(object):
                     _events.entity_retired(self._event_user["name"], entity_type, entity_id, self._row_name(row), when),
                     row, linked=False,
                 )
+            _taskflow.after_delete(self, entity_type, row)
             return True
         else:
             return False
@@ -751,6 +763,7 @@ class Shotgun(object):
                     _events.entity_revived(self._event_user["name"], entity_type, entity_id, self._row_name(row), when),
                     row,
                 )
+            _taskflow.after_revive(self, entity_type, row)
             return True
         else:
             return False
