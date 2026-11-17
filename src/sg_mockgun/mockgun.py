@@ -126,6 +126,7 @@ from shotgun_api3.shotgun import _Config
 from .errors import MockgunError
 from .display import display_name
 from .schema import SchemaFactory
+from . import attention as _attention
 from . import events as _events
 from . import media as _media
 from . import seed as _seed
@@ -1504,3 +1505,84 @@ class Shotgun(object):
     def restore(self, state):
         """Put this instance's records and schema back to a ``snapshot``."""
         _seed.restore(self, state)
+
+    ###################################################################################################
+    # attention, navigation and site reads (sg_mockgun.attention, api3 047 to 052)
+
+    def note_thread_read(self, note_id, entity_fields=None):
+        """Return a Note, its Replies and its Attachments, oldest first."""
+        entity_fields = entity_fields or {}
+        if not isinstance(entity_fields, dict):
+            raise ValueError("entity_fields parameter must be a dictionary")
+        return _attention.note_thread_contents(self, note_id, entity_fields)
+
+    def activity_stream_read(self, entity_type, entity_id, entity_fields=None, min_id=None, max_id=None, limit=None):
+        """Return the ``create`` updates on a record and on the rows linked to it, newest first."""
+        entity_fields = entity_fields or {}
+        if not isinstance(entity_fields, dict):
+            raise ValueError("entity_fields parameter must be a dictionary")
+        return _attention.activity_stream(self, entity_type, entity_id, entity_fields, min_id, max_id, limit)
+
+    def followers(self, entity):
+        """Return the HumanUsers following ``entity``."""
+        return _attention.followers(self, entity)
+
+    def following(self, user, project=None, entity_type=None):
+        """Return the ``{type, id}`` of every record ``user`` follows."""
+        params = {"user": user}
+        if project:
+            params["project"] = project
+        if entity_type:
+            params["entity_type"] = entity_type
+        return _attention.following(self, params)
+
+    def set_following(self, user, entities):
+        """Make ``user`` (a HumanUser link) follow exactly ``entities``."""
+        _attention.state(self)["follows"][user["id"]] = [{"type": e["type"], "id": e["id"]} for e in entities]
+
+    def nav_expand(self, path, seed_entity_field=None, entity_fields=None):
+        """Return the navigation node at ``path`` with its children."""
+        return _attention.nav_expand(self, path, seed_entity_field, entity_fields)
+
+    def nav_search_string(self, root_path, search_string, seed_entity_field=None):
+        """Return the navigation rows under ``root_path`` whose label contains ``search_string``."""
+        return _attention.nav_search(self, root_path, {"search_string": search_string})
+
+    def nav_search_entity(self, root_path, entity, seed_entity_field=None):
+        """Return the navigation row of ``entity`` under ``root_path``."""
+        return _attention.nav_search(self, root_path, {"entity": entity})
+
+    def preferences_read(self, prefs=None):
+        """Return the site preferences, or only those named in ``prefs``."""
+        return _attention.preferences_read(self, prefs or [])
+
+    def set_preferences(self, values):
+        """Change site preferences for ``preferences_read``."""
+        _attention.state(self)["preferences"].update(values)
+
+    def work_schedule_read(self, start_date, end_date, project=None, user=None):
+        """Return the work day rule of each date from ``start_date`` to ``end_date`` inclusive."""
+        if not isinstance(start_date, str) or not isinstance(end_date, str):
+            raise ShotgunError("The start_date and end_date arguments must be strings in YYYY-MM-DD format")
+        return _attention.work_schedule_read(
+            self, {"start_date": start_date, "end_date": end_date, "project": project, "user": user})
+
+    def set_work_schedule(self, week=None, exceptions=None):
+        """Set the studio week (seven booleans, Monday first) and per-date rules for ``work_schedule_read``."""
+        state = _attention.state(self)
+        if week is not None:
+            state["work_week"] = list(week)
+        if exceptions is not None:
+            state["work_exceptions"] = dict(exceptions)
+
+    def user_subscriptions_read(self):
+        """Return the subscription of each HumanUser, keyed by the user id as a string."""
+        return dict(_attention.state(self)["subscriptions"])
+
+    def set_user_subscriptions(self, subscriptions):
+        """Set what ``user_subscriptions_read`` returns."""
+        _attention.state(self)["subscriptions"] = dict(subscriptions)
+
+    def export_page(self, page_id, format, layout_name=None):
+        """Refuse a page export the way a site with no exportable page does."""
+        return _attention.export_page(self, {"format": format, "page_id": page_id, "layout_name": layout_name})

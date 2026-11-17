@@ -65,6 +65,22 @@ and `get_attachment_download_url` answer as api3 answers 053 to 058 in `docs/api
   `share_thumbnail` from a transient source raises `ShotgunThumbnailNotReady`.
 - Upload events beyond the Attachment create, and the HTTP server's upload routes, are not modelled.
 
+## Attention, navigation and site reads
+
+`note_thread_read`, `activity_stream_read`, `followers`, `following`, `nav_expand`,
+`nav_search_string`, `nav_search_entity`, `preferences_read`, `work_schedule_read`,
+`user_subscriptions_read` and `export_page` answer as recorded in `docs/api3/047` to `052`, in process
+and over `sg-mockgun serve`. Activity stream rows are the `create` rows of the event log. Site data
+the mock cannot know has a default and a setter:
+
+- `sg.set_following(user, entities)`: what `user` follows. Default: nothing.
+- `sg.set_preferences(values)`: preferences. Default: 17 keys of the recorded types.
+- `sg.set_work_schedule(week=None, exceptions=None)`: seven booleans, Monday first, and rules per
+  `YYYY-MM-DD`. Default: Monday to Friday, `STUDIO_WORK_WEEK`.
+- `sg.set_user_subscriptions(subscriptions)`: keyed by HumanUser id as a string. Default: `{}`.
+
+`export_page` refuses every page, as a site with no exportable page does.
+
 ## Bundled schema
 
 `sg_mockgun.schemas.paths()` returns a schema pulled from a Flow PT 8.91 site on 2026-11-12: 95
