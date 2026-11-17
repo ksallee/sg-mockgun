@@ -1,6 +1,7 @@
 """Filter relations, null rules and refusals per data type, as the site answers them over REST."""
 
 import pytest
+import shotgun_api3.shotgun as api3
 from shotgun_api3 import ShotgunError
 
 from sg_mockgun import Shotgun, schemas
@@ -64,9 +65,9 @@ def test_float_not_in_includes_null(sg):
 
 @pytest.mark.parametrize("value", [1001, [1001], [0, 1, 2]])
 def test_between_needs_two_values(sg, value):
-    # field_types/number
+    # api3 003
     put(sg, "Shot", "sg_cut_order", [1001])
-    expected = "API read() 'between' 'relation' expects a 2-element array: %s" % (
+    expected = "API read() 'between' 'relation' expects a 2-element array:\n%s" % (
         "[1001]" if value == 1001 else str(value))
     with pytest.raises(ShotgunError) as e:
         sg.find("Shot", [["sg_cut_order", "between", value]])
@@ -124,12 +125,15 @@ def test_uuid_relations_and_null_refusal(sg):
     assert str(e.value) == "API read() Icon.uuid expected [String] data type(s) but got NilClass: nil"
 
 
-def test_in_needs_one_value(sg):
-    # field_types/uuid
+def test_in_needs_one_value(sg, monkeypatch):
+    # field_types/uuid. api3 011: the client raises IndexError unless its entity optimisation is off.
     put(sg, "Icon", "uuid", [None])
+    with pytest.raises(IndexError):
+        sg.find("Icon", [["uuid", "in", []]])
+    monkeypatch.setattr(api3, "SHOTGUN_API_DISABLE_ENTITY_OPTIMIZATION", True)
     with pytest.raises(ShotgunError) as e:
         sg.find("Icon", [["uuid", "in", []]])
-    assert str(e.value) == "API read() 'in' 'relation' expects at least a 1-element array: []"
+    assert str(e.value) == "API read() 'in' 'relation' expects at least a 1-element array:\n[]"
 
 
 def test_image_takes_only_none(sg):
@@ -166,12 +170,12 @@ def test_audit_trail_filter_is_ignored(sg):
 
 @pytest.mark.parametrize("operator", ["is", "is_not"])
 def test_checkbox_refuses_none(sg, operator):
-    # field_types/checkbox
+    # api3 005
     put(sg, "Version", "flagged", [False])
     with pytest.raises(ShotgunError) as e:
         sg.find("Version", [["flagged", operator, None]])
     assert str(e.value) == (
-        "API read() Version.flagged expected [String, FalseClass, TrueClass] data type(s) but got NilClass: nil")
+        "API read() Version.flagged expected [FalseClass, TrueClass] data type(s) but got NilClass:\nnil")
 
 
 @pytest.mark.parametrize("field", ["sg_version_type", "sg_status_list"])
@@ -186,21 +190,23 @@ def test_list_matches_case_insensitively(sg, field):
 
 
 def test_unknown_operator_has_the_site_wording(sg):
-    # finding 017
+    # api3 001
     put(sg, "Shot", "code", ["sh010"])
     with pytest.raises(ShotgunError) as e:
         sg.find("Shot", [["code", "definitely_not_an_operator", "x"]])
     assert str(e.value) == (
-        "API read() Shot.code's 'text' data type doesn't support 'definitely_not_an_operator' 'relation'. "
-        'Valid relations: ["contains", "not_contains", "is", "is_not", "starts_with", "ends_with", "in", "not_in"]')
+        "API read() Shot.code's 'text' data type doesn't support 'definitely_not_an_operator' 'relation':\n"
+        '{"path" => "code",\n "relation" => "definitely_not_an_operator",\n "values" => ["x"]}\n'
+        'Valid relations:\n["contains",\n "not_contains",\n "is",\n "is_not",\n "starts_with",\n'
+        ' "ends_with",\n "in",\n "not_in"]')
 
 
 def test_list_refuses_text_relations(sg):
     # finding 017, probe 068
     put(sg, "Note", "sg_note_type", ["Client"])
     with pytest.raises(ShotgunError, match=r"^API read\(\) Note.sg_note_type's 'list' data type doesn't support "
-                                            r"'contains' 'relation'\. Valid relations: \[\"is\", \"is_not\", "
-                                            r"\"in\", \"not_in\"\]$"):
+                                            r"'contains' 'relation':\n.*\nValid relations:\n"
+                                            r"\[\"is\", \"is_not\", \"in\", \"not_in\"\]$"):
         sg.find("Note", [["sg_note_type", "contains", "Client"]])
 
 
@@ -212,18 +218,18 @@ def test_unknown_operator_names_the_leaf_of_a_dotted_path(sg):
 
 
 @pytest.mark.parametrize("entity_type,field,data_type", [
-    ("Task", "workload", "calculated"),
     ("Task", "splits", "serializable"),
     ("Shot", "open_notes_count", "summary"),
     ("Version", "sg_uploaded_movie", "url"),
 ])
 def test_unfilterable_types(sg, entity_type, field, data_type):
-    # finding 017
+    # api3 001
     put(sg, entity_type, field, [None])
     with pytest.raises(ShotgunError) as e:
         sg.find(entity_type, [[field, "is", None]])
-    assert str(e.value) == "API read() %s.%s's '%s' data type cannot be used in a filter." % (
-        entity_type, field, data_type)
+    assert str(e.value) == (
+        "API read() %s.%s's '%s' data type cannot be used in a filter:\n"
+        '{"path" => "%s", "relation" => "is", "values" => [nil]}' % (entity_type, field, data_type, field))
 
 
 def test_password_is_unfilterable(sg):
@@ -241,6 +247,6 @@ def test_pivot_column_is_not_supported(sg):
     with pytest.raises(ShotgunError) as e:
         sg.find("Shot", [["step_8", "is", None]])
     assert str(e.value) == "API read() of data type 'pivot_column' not supported in API"
-    with pytest.raises(ShotgunError, match=r"'pivot_column' data type doesn't support 'contains' 'relation'\. "
-                                           r"Valid relations: \[\"is\", \"is_not\"\]$"):
+    with pytest.raises(ShotgunError, match=r"'pivot_column' data type doesn't support 'contains' 'relation':\n.*\n"
+                                           r"Valid relations:\n\[\"is\", \"is_not\"\]$"):
         sg.find("Shot", [["step_8", "contains", "fin"]])

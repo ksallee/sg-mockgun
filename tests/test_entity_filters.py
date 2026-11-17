@@ -3,7 +3,7 @@
 import os
 
 import pytest
-from shotgun_api3 import ShotgunError
+from shotgun_api3 import Fault, ShotgunError
 
 from sg_mockgun import Shotgun as Mockgun
 
@@ -50,7 +50,7 @@ def test_entity_in_matches_any_listed_entity(versions):
 
 def test_entity_not_in(versions):
     sg, a, b, _, _ = versions
-    # unlinked rows unmeasured on entity (sg-mockgun#39); negation matches null rows
+    # api3 010: negation matches unset rows
     assert codes(sg, "Version", [["entity", "not_in", [a, b]]]) == ["vasset", "vnone"]
     assert codes(sg, "Version", [["entity", "not_in", a]]) == ["vasset", "vb", "vnone"]
 
@@ -58,13 +58,14 @@ def test_entity_not_in(versions):
 def test_entity_type_is(versions):
     sg = versions[0]
     assert codes(sg, "Version", [["entity", "type_is", "Shot"]]) == ["va", "vb"]
-    assert codes(sg, "Version", [["entity", "type_is", None]]) == []
+    # api3 010: `type_is None` means unset.
+    assert codes(sg, "Version", [["entity", "type_is", None]]) == ["vnone"]
 
 
 def test_entity_type_is_not(versions):
     sg = versions[0]
     assert codes(sg, "Version", [["entity", "type_is_not", "Shot"]]) == ["vasset", "vnone"]
-    assert codes(sg, "Version", [["entity", "type_is_not", None]]) == ["va", "vasset", "vb", "vnone"]
+    assert codes(sg, "Version", [["entity", "type_is_not", None]]) == ["va", "vasset", "vb"]
 
 
 def test_entity_name_operators(versions):
@@ -141,9 +142,10 @@ def test_multi_entity_in(playlists):
     assert codes(sg, "Version", [["playlists", "in", [a, b]]]) == ["AB", "A_only", "B_only"]
 
 
-def test_multi_entity_in_refuses_empty_list(playlists):
+def test_multi_entity_in_empty_list_raises_index_error(playlists):
+    # api3 011: the api3 client raises before sending.
     sg = playlists[0]
-    with pytest.raises(ShotgunError, match="'in' 'relation' expects at least a 1-element array: \\[\\]"):
+    with pytest.raises(IndexError):
         sg.find("Version", [["playlists", "in", []]])
 
 
@@ -192,45 +194,46 @@ def test_multi_entity_name_is_compares_the_display_name(sg):
 # field_types/entity, field_types/multi_entity: the site's `Valid relations` list.
 
 _LINK_RELATIONS = (
-    '\\["is", "is_not", "name_contains", "name_not_contains", "name_is", "type_is", "type_is_not", '
-    '"in", "not_in"\\]'
+    '\\["is",\n "is_not",\n "name_contains",\n "name_not_contains",\n "name_is",\n "type_is",\n'
+    ' "type_is_not",\n "in",\n "not_in"\\]'
 )
 
 
 def test_entity_unknown_operator_names_the_valid_relations(sg):
-    pattern = "Version.entity's 'entity' data type doesn't support 'starts_with' 'relation'. Valid relations: "
-    with pytest.raises(ShotgunError, match=pattern + _LINK_RELATIONS):
+    # api3 001
+    pattern = "Version.entity's 'entity' data type doesn't support 'starts_with' 'relation':\n.*\nValid relations:\n"
+    with pytest.raises(Fault, match=pattern + _LINK_RELATIONS):
         sg.find("Version", [["entity", "starts_with", "sh"]])
 
 
 def test_multi_entity_bare_contains_names_the_type_and_field(sg):
-    pattern = "Version.playlists's 'multi_entity' data type doesn't support 'contains' 'relation'. Valid relations: "
-    with pytest.raises(ShotgunError, match=pattern + _LINK_RELATIONS):
+    pattern = "Version.playlists's 'multi_entity' data type doesn't support 'contains' 'relation':\n.*\nValid relations:\n"
+    with pytest.raises(Fault, match=pattern + _LINK_RELATIONS):
         sg.find("Version", [["playlists", "contains", "zz"]])
 
 
-# Refusals are raised before the scan; empty-table case unprobed (sg-mockgun#39).
+# api3 013: refusals are raised before the scan.
 
 
 @pytest.mark.parametrize("sg_filter", [
     ["entity", "starts_with", "sh"],
     ["sg_uploaded_movie", "is", None],
     ["entity.Shot.no_such_field", "is", "x"],
-    ["playlists", "in", []],
     ["playlists", "is", [{"type": "Playlist", "id": 1}, {"type": "Playlist", "id": 2}]],
     ["entity", "name_is", None],
 ])
 def test_refusals_raise_on_an_empty_table(sg, sg_filter):
-    with pytest.raises(ShotgunError):
+    with pytest.raises(Fault):
         sg.find("Version", [sg_filter])
 
 
 def test_refusals_raise_inside_a_nested_group_on_an_empty_table(sg):
-    nested = {"filter_operator": "any", "filters": [["code", "is", "x"], ["playlists", "in", []]]}
-    with pytest.raises(ShotgunError):
+    nested = {"filter_operator": "any", "filters": [["code", "is", "x"], ["entity", "name_is", None]]}
+    with pytest.raises(Fault):
         sg.find("Version", [nested])
 
 
-def test_entity_in_empty_list_still_matches_nothing(versions):
-    # entity `in []` unmeasured (sg-mockgun#39)
-    assert codes(versions[0], "Version", [["entity", "in", []]]) == []
+def test_entity_in_empty_list_raises_index_error(versions):
+    # api3 015: the api3 client raises before sending.
+    with pytest.raises(IndexError):
+        versions[0].find("Version", [["entity", "in", []]])

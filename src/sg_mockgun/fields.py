@@ -38,6 +38,21 @@ def ruby_inspect(value):
     return str(value)
 
 
+def ruby_pp(value, indent=0, width=80):
+    """Ruby ``pp`` of a Python value: one line when it fits in ``width`` columns, else one item per line."""
+    flat = ruby_inspect(value)
+    if indent + len(flat) <= width or not isinstance(value, (dict, list, tuple)) or not value:
+        return flat
+    pad = "\n" + " " * (indent + 1)
+    if isinstance(value, dict):
+        items = []
+        for k, v in value.items():
+            key = "%s => " % ruby_inspect(k)
+            items.append(key + ruby_pp(v, indent + 1 + len(key), width))
+        return "{" + ("," + pad).join(items) + "}"
+    return "[" + ("," + pad).join(ruby_pp(v, indent + 1, width) for v in value) + "]"
+
+
 def ruby_list(items):
     """A list of strings laid out the way the site's ``pp`` prints one: one item per line."""
     if not items:

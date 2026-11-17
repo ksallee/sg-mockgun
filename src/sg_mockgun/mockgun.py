@@ -132,7 +132,11 @@ from . import events as _events
 from . import media as _media
 from . import seed as _seed
 from . import writes as _writes
-from .filters import IGNORED, filter_refusal, jsonb_contains
+import shotgun_api3.shotgun as _api3
+from .filters import (
+    CALENDAR, IGNORED, RELATIVE, calculated_type, client_index_error, filter_refusal, filter_values,
+    jsonb_contains, relative_match, unknown_field,
+)
 from .fields import CREATABLE_TYPES, UPDATABLE_PROPERTIES, field_code, new_field, ruby_inspect, ruby_list, ruby_params
 
 def _utc_now():
@@ -463,7 +467,7 @@ class Shotgun(object):
             # traditiona style sg filters
             resolved_filters = filters
 
-        # validated before the scan; empty-table case unprobed (sg-mockgun#39)
+        # api3 013: validated before the scan.
         self._validate_filters(entity_type, resolved_filters)
 
         results = [
@@ -1087,10 +1091,9 @@ class Shotgun(object):
         # A list of scalar values comes from a dotted path through a multi_entity field.
         # A jsonb array is one value.
         if isinstance(lval, list) and field_type not in ("multi_entity", "jsonb"):
-            # No linked row of the named type matches no operator. Unmeasured: finding 016's
-            # is_not null sample may have had every row linked (sg-mockgun#39).
+            # No linked row of the named type reads null (api3 012).
             if not lval:
-                return False
+                return self._compare(field_type, None, operator, rval)
             # Compare each one. If one matches the predicate we're good!
             return any((self._compare(field_type, sub_val, operator, rval)) for sub_val in lval)
 
@@ -1101,6 +1104,9 @@ class Shotgun(object):
                 return lval != rval
         elif field_type in ("float", "number", "percent", "duration", "timecode", "date", "date_time"):
             is_date = field_type in ("date", "date_time")
+            # api3 014
+            if is_date and (operator in RELATIVE or operator in CALENDAR):
+                return relative_match(lval, operator, filter_values(rval), self._clock(), field_type == "date")
             if is_date and operator in ("in", "not_in") and not isinstance(rval, list):
                 rval = [rval]
             if operator == "is":
@@ -1164,6 +1170,9 @@ class Shotgun(object):
             # Some operations expect a list but can deal with a single value
             if operator in ("in", "not_in") and not isinstance(rval, list):
                 rval = [rval]
+            # A "" write stores null, and `is ""` matches the null rows (api3 030).
+            elif operator in ("is", "is_not") and rval == "":
+                rval = None
             # Some operation expect a string but can deal with None
             elif operator in ("starts_with", "ends_with", "contains", "not_contains"):
                 lval = lval or ''
@@ -1203,14 +1212,14 @@ class Shotgun(object):
                 if lval is None or rval is None:
                     return lval != rval
                 return lval["type"] != rval["type"] or lval["id"] != rval["id"]
+            # `type_is None` means unset; unset rows match every negation (api3 010).
             elif operator == "type_is" and rval is None:
-                return False
+                return lval is None
             elif operator == "type_is_not" and rval is None:
-                return True
+                return lval is not None
             elif lval is None and operator in ("in", "type_is", "name_is", "name_contains"):
                 return False
             elif lval is None and operator in ("not_in", "type_is_not", "name_not_contains"):
-                # unlinked rows unmeasured on entity (sg-mockgun#39)
                 return True
             elif operator == "in":
                 return any(_same_link(lval, sub_rval) for sub_rval in rval)
@@ -1245,6 +1254,11 @@ class Shotgun(object):
                 return any(_same_link(sub_lval, sub_rval) for sub_lval in lval for sub_rval in rval)
             elif operator == "not_in":
                 return not any(_same_link(sub_lval, sub_rval) for sub_lval in lval for sub_rval in rval)
+            # `type_is None` means no links; empty rows match every negation (api3 011).
+            elif operator == "type_is" and rval is None:
+                return len(lval) == 0
+            elif operator == "type_is_not" and rval is None:
+                return len(lval) != 0
             elif operator == "type_is":
                 return any(sub_lval["type"] == rval for sub_lval in lval)
             elif operator == "type_is_not":
@@ -1253,6 +1267,8 @@ class Shotgun(object):
                 return any(_link_name(sub_lval) == rval for sub_lval in lval)
             elif operator == "name_contains":
                 return any(rval in _link_name(sub_lval) for sub_lval in lval)
+            elif operator == "name_not_contains":
+                return not any(rval in _link_name(sub_lval) for sub_lval in lval)
 
         raise ShotgunError("mockgun does not implement the '%s' relation on the '%s' data type" % (operator, field_type))
 
@@ -1343,42 +1359,84 @@ class Shotgun(object):
 
             field_type = self._get_field_type(entity_type, field)
 
+            # A link to a retired row reads None, or drops out of the list (api3 027).
+            if field_type == "entity" and isinstance(lval, dict) and self._is_retired_link(lval):
+                lval = None
+            elif field_type == "multi_entity" and isinstance(lval, list):
+                lval = [link for link in lval if not self._is_retired_link(link)]
+            elif field_type == "calculated":
+                field_type = calculated_type(self._field_properties(entity_type, field))
+
             # Name operators compare the display name `find` returns, on copies of the stored links (finding 060).
             if field_type == "entity" and isinstance(lval, dict):
                 lval = self._named_link(lval)
             elif field_type == "multi_entity" and operator.startswith("name_") and isinstance(lval, list):
                 lval = [self._named_link(link) for link in lval]
 
-            if self._filter_ignored(entity_type, field, field_type, operator, rval):
+            if (entity_type, field) in IGNORED:
                 return True
             return self._compare(field_type, lval, operator, rval)
 
+    def _is_retired_link(self, link):
+        row = self._db.get(link.get("type"), {}).get(link.get("id"))
+        return bool(row and row.get("__retired"))
+
+    def _field_properties(self, entity_type, path):
+        """The schema properties of a field, or of the last field of a dotted path."""
+        parts = path.split(".")
+        return self._schema[parts[-2] if len(parts) > 1 else entity_type][parts[-1]].get("properties", {})
+
+    def _filter_field_type(self, entity_type, path):
+        """The data type a filter path ends on, or None when a hop names no field (api3 013)."""
+        parts = path.split(".")
+        if len(parts) % 2 == 0:
+            return None
+        fields = self._schema.get(entity_type, {})
+        for i in range(0, len(parts) - 1, 2):
+            if parts[i] not in fields:
+                return None
+            fields = self._schema.get(parts[i + 1], {})
+        if parts[-1] not in fields:
+            return None
+        return fields[parts[-1]]["data_type"]["value"]
+
     def _validate_filters(self, entity_type, filters):
-        """Raise the site's refusal of any filter in ``filters``, nested groups included."""
+        """Raise what the api3 client raises building ``filters``, then the site's refusal of any of them."""
+        disabled = _api3.SHOTGUN_API_DISABLE_ENTITY_OPTIMIZATION
+        for field, operator, rval in self._flat_filters(filters):
+            if client_index_error(field, operator, rval, disabled):
+                # api3 011, api3 015: the client's `values[0]` on an empty list.
+                raise IndexError("list index out of range")
+        for field, operator, rval in self._flat_filters(filters):
+            field_type = self._filter_field_type(entity_type, field)
+            if field_type is None:
+                raise Fault(unknown_field(entity_type, field, operator, rval))
+            last_type, last_field = entity_type, field
+            while last_field.count(".") >= 2:
+                _, last_type, last_field = last_field.split(".", 2)
+            if (last_type, last_field) in IGNORED:
+                continue
+            if field_type == "calculated":
+                # api3 002, api3 006
+                if operator in ("in", "not_in") and None in filter_values(rval):
+                    raise Fault("API read() CRUD ERROR #10: Read failed for entity type [%s]" % last_type)
+                field_type = calculated_type(self._field_properties(entity_type, field))
+            refusal = filter_refusal(last_type, last_field, field_type, operator, rval, path=field)
+            if refusal:
+                raise Fault(refusal)
+
+    def _flat_filters(self, filters):
+        """Each ``[field, operator, value]`` in ``filters``, nested groups included."""
         for sg_filter in self._rearrange_filters(filters):
             if len(sg_filter) != 3:
                 continue
             field, operator, rval = sg_filter
             if field is None:
                 if operator in ("any", "all"):
-                    self._validate_filters(entity_type, rval)
+                    for nested in self._flat_filters(rval):
+                        yield nested
                 continue
-            try:
-                field_type = self._get_field_type(entity_type, field)
-            except KeyError:
-                # An unknown field is raised by the row scan.
-                continue
-            self._filter_ignored(entity_type, field, field_type, operator, rval)
-
-    def _filter_ignored(self, entity_type, field, field_type, operator, rval):
-        """Raise the site's refusal of a filter, or say whether the site ignores it and returns every row."""
-        while field.count(".") >= 2:
-            _, entity_type, field = field.split(".", 2)
-        refusal = filter_refusal(entity_type, field, field_type, operator, rval)
-        if refusal:
-            # REST wording; api3 unprobed (sg-mockgun#39)
-            raise ShotgunError(refusal)
-        return (entity_type, field) in IGNORED
+            yield field, operator, rval
 
     def _rearrange_filters(self, filters: list) -> None:
         """
