@@ -129,6 +129,11 @@ from . import writes as _writes
 from .filters import IGNORED, filter_refusal, jsonb_contains
 from .fields import CREATABLE_TYPES, UPDATABLE_PROPERTIES, field_code, new_field, ruby_inspect, ruby_list, ruby_params
 
+def _utc_now():
+    """The current time in UTC."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
 def _same_link(a, b):
     """Whether two entity links name the same row."""
     return a["type"] == b["type"] and a["id"] == b["id"]
@@ -245,7 +250,7 @@ class Shotgun(object):
         # The event log. Like an ApiUser's generate_event_log_entries (sg-groundtruth finding 049), but
         # on by default so a test sees its writes logged unless it says otherwise.
         self.generate_event_log_entries = True
-        self._clock = lambda: datetime.datetime.now(datetime.timezone.utc)
+        self._clock = _utc_now
         self._event_user = {"type": "ApiUser", "id": 1, "name": script_name or login or "mockgun"}
         self._column_ids = {}
         self._retired_at = {}
