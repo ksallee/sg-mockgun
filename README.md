@@ -7,6 +7,8 @@ with behaviour recorded by [sg-groundtruth](https://github.com/ksallee/sg-ground
 Status: `0.1.0`. Mockgun as vendored from shotgun_api3 3.10.5, upstream tests passing, plus a clean
 current schema, schema field writes, an event log, and an HTTP server a real client connects to.
 
+[Coverage](docs/coverage.md): each api3 call the conformance suite checks, with its result on the mock and on a live site.
+
 ## Why
 
 Upstream mockgun covers find, create, update, delete, revive and batch against a pickled schema. It
