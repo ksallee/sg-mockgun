@@ -1,7 +1,6 @@
 # Runs tk-core's test suite against sg-mockgun, with the event log off and then on.
 # tk-core is cloned at the commit pinned in tools/run_tk_core.py. Its licence is not BSD, so none of
 # its files are copied into this repo.
-# Non-blocking until the suite passes.
 
 name: tk-core
 
@@ -16,7 +15,6 @@ jobs:
   tk-core:
     name: tk-core suite, Python ${{ matrix.python }}
     runs-on: ubuntu-latest
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:

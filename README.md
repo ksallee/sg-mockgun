@@ -139,6 +139,8 @@ it ships with the client's own licence and covers the common production entities
     sg = Shotgun("https://mock.example.com", script_name="x", api_key="y")
 
 `sg.set_info(**values)` changes keys of the payload `info()`, `server_info` and `server_caps` read.
+`server_info` and `server_caps` take an assigned value, as upstream mockgun's callers assign them. `server_caps` follows an assigned `server_info`.
+A naive `datetime` in a write or a filter is local time, as the client sends it.
 
 ## Testing with pytest
 
