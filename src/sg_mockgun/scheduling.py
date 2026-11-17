@@ -59,8 +59,8 @@ def start_from(due, duration, week):
 def own_write(old, data, has_upstream, week):
     """The fields the site sets beside ``data`` on a Task write, other than the sent ones.
 
-    A ``start_date`` write pins a Task with an upstream, null or real (finding 093); nothing else
-    pins (finding 097, 100). A ``due_date`` write resizes, a ``start_date`` or ``duration`` write
+    A ``start_date`` write that changes the value pins a Task with an upstream, null or real
+    (finding 093); nothing else pins (finding 097, 100). A ``due_date`` write resizes, a ``start_date`` or ``duration`` write
     moves ``due_date`` and keeps ``duration``.
     """
     merged = dict(old)
@@ -76,7 +76,7 @@ def own_write(old, data, has_upstream, week):
     elif "due_date" in data:
         if start and due:
             changes["duration"] = duration_between(start, due, week)
-    if "start_date" in data and has_upstream and "pinned" not in data:
+    if "start_date" in data and data["start_date"] != old.get("start_date") and has_upstream and "pinned" not in data:
         changes["pinned"] = True
     return dict((k, v) for k, v in changes.items() if merged.get(k) != v)
 

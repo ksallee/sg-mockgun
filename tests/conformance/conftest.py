@@ -1,13 +1,13 @@
 """Fixtures for the conformance suite: one set of api3 calls, run on the mock or on a live site.
 
-The default target is the mock on the bundled schema. `--live` targets the site named in `.env.local`
-at the repo root. Writes go through `made` and schema field writes through `fields`, which refuse
+The default target is the mock on the bundled schema. `--live` targets the site named in `.env.local`,
+found as `probes/_lib.py` finds it. Writes go through `made` and schema field writes through `fields`, which refuse
 anything outside the sandbox project and the `sg_zzprobe_mockgun_` prefix, on both targets.
 """
 
 import datetime
+import importlib.util
 import json
-import os
 import time
 from pathlib import Path
 
@@ -20,20 +20,24 @@ HERE = Path(__file__).resolve().parent
 LIVE_RESULTS = ROOT / "docs" / "conformance-live.json"
 FIELD_PREFIX = "sg_zzprobe_mockgun_"
 ENTITY_WRITES = ("create", "update", "delete", "revive", "batch")
+MEDIA_WRITES = ("upload", "upload_thumbnail", "upload_filmstrip_thumbnail", "share_thumbnail")
 SCHEMA_WRITES = ("schema_field_create", "schema_field_update", "schema_field_delete")
 
 
-def load_env(root=ROOT):
-    """`.env.local` under ``root`` layered over a copy of os.environ, as sg-groundtruth loads it."""
-    env = dict(os.environ)
-    f = root / ".env.local"
-    if f.is_file():
-        for line in f.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                env[k.strip()] = v.strip().strip("'\"")
-    return env
+def _probe_lib():
+    spec = importlib.util.spec_from_file_location("probe_lib", ROOT / "probes" / "_lib.py")
+    lib = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lib)
+    return lib
+
+
+def load_env():
+    """The env the probes read: `.env.local` here, else a sibling sg-groundtruth's, over os.environ."""
+    lib = _probe_lib()
+    try:
+        return lib.load_env()
+    except SystemExit:
+        raise pytest.UsageError("Add .env.local here or in a sibling sg-groundtruth to run --live.")
 
 
 def need(env, key):
@@ -126,7 +130,7 @@ class ReadOnly:
         self._client = client
 
     def __getattr__(self, name):
-        if name in ENTITY_WRITES + SCHEMA_WRITES:
+        if name in ENTITY_WRITES + MEDIA_WRITES + SCHEMA_WRITES:
             raise AttributeError("Write through the made or fields fixture, not site.%s." % name)
         return getattr(self._client, name)
 
@@ -189,16 +193,27 @@ def run_token(live):
 # Writes
 
 
+MISSING_IDS = (0, 999999999)
+
+
 class Created:
     """Rows a test made, deleted in reverse order when it finishes.
 
-    A create must link the sandbox project. An update, delete or revive must name a row made here.
+    A create must link the sandbox project. A TaskDependency must join two Tasks made here, a Reply a Note made here.
+    An update, delete or revive must name a row made here.
     """
 
     def __init__(self, client, sandbox):
         self.client, self.sandbox, self.rows = client, sandbox, []
 
     def _check_create(self, entity_type, data):
+        if entity_type == "TaskDependency":
+            for key in ("task", "dependent_task"):
+                self._check_known("Task", (data.get(key) or {}).get("id"))
+            return
+        if entity_type == "Reply":
+            self._check_known("Note", (data.get("entity") or {}).get("id"))
+            return
         project = data.get("project") or {}
         if entity_type == "Project" or project.get("type") != "Project" or project.get("id") != self.sandbox["id"]:
             raise ValueError("A create must set project to the sandbox project.")
@@ -207,14 +222,49 @@ class Created:
         if (entity_type, entity_id) not in self.rows:
             raise ValueError("Write only to rows this test made: %s %s is not one." % (entity_type, entity_id))
 
+    def track(self, entity_type, entity_id):
+        """Record a row the site made for a write here, such as an upload's Attachment, so cleanup deletes it."""
+        if (entity_type, entity_id) not in self.rows:
+            self.rows.append((entity_type, entity_id))
+
     def create(self, entity_type, data, return_fields=None):
         self._check_create(entity_type, data)
         row = self.client.create(entity_type, data, return_fields)
         self.rows.append((entity_type, row["id"]))
         return row
 
+    def refused(self, method, *args):
+        """Send a write the site refuses and return its exception. A write that succeeds is undone and fails the test.
+
+        A refused create may omit the sandbox project. An update or delete names a row made here or a missing id.
+        """
+        requests = args[0] if method == "batch" else [
+            {"request_type": method, "entity_type": args[0], "data": args[1]} if method == "create"
+            else {"request_type": method, "entity_type": args[0], "entity_id": args[1]}]
+        for r in requests:
+            if r["request_type"] == "create":
+                if r["entity_type"] == "Project" or (r["data"].get("project") not in (None, self.sandbox)
+                                                     and r["entity_type"] != "TaskDependency"):
+                    raise ValueError("A refused create must name the sandbox project or none.")
+            elif r["entity_id"] not in MISSING_IDS:
+                self._check_known(r["entity_type"], r["entity_id"])
+        try:
+            result = getattr(self.client, method)(*args)
+        except Exception as e:  # noqa: BLE001
+            return e
+        results = result if method == "batch" else [result]
+        for r, row in zip(requests, results):
+            if r["request_type"] == "create":
+                self.rows.append((r["entity_type"], row["id"]))
+        raise AssertionError("The %s was accepted. The site refuses it." % method)
+
     def update(self, entity_type, entity_id, data, **kwargs):
         self._check_known(entity_type, entity_id)
+        for key in data:
+            if "." in key:
+                link = self.client.find_one(entity_type, [["id", "is", entity_id]], [key.split(".")[0]])
+                target = link[key.split(".")[0]] or {}
+                self._check_known(target.get("type"), target.get("id"))
         return self.client.update(entity_type, entity_id, data, **kwargs)
 
     def delete(self, entity_type, entity_id):
@@ -237,13 +287,35 @@ class Created:
                 self.rows.append((r["entity_type"], result["id"]))
         return results
 
+    def upload(self, entity_type, entity_id, path, **kwargs):
+        """Upload to a row made here. The Attachment the site makes is deleted on cleanup."""
+        self._check_known(entity_type, entity_id)
+        attachment_id = self.client.upload(entity_type, entity_id, path, **kwargs)
+        self.track("Attachment", attachment_id)
+        return attachment_id
+
+    def upload_thumbnail(self, entity_type, entity_id, path):
+        self._check_known(entity_type, entity_id)
+        return self.client.upload_thumbnail(entity_type, entity_id, path)
+
+    def share_thumbnail(self, entities, source_entity):
+        for entity in entities + [source_entity]:
+            self._check_known(entity["type"], entity["id"])
+        return self.client.share_thumbnail(entities, source_entity=source_entity)
+
     def cleanup(self):
-        """Delete every row made here, newest first. A row already deleted answers False and is skipped."""
+        """Delete every row made here, newest first.
+
+        A row already deleted answers False and is skipped. A row the site erased, such as an edge a template
+        re-apply replaced, answers `does not exist` and is skipped.
+        """
         errors = []
         for entity_type, entity_id in reversed(self.rows):
             try:
                 self.client.delete(entity_type, entity_id)
             except Exception as e:  # noqa: BLE001
+                if "does not exist" in str(e):
+                    continue
                 errors.append("%s %s: %s" % (entity_type, entity_id, e))
         self.rows = []
         if errors:

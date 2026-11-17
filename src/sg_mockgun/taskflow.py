@@ -154,6 +154,8 @@ def _apply_template(mock, row, template_link):
             continue
         made = mock.create("Task", _templates.new_task(template_task, fields, entity, row.get("project")))
         linked[source] = made["id"]
+        if "tasks" in row:
+            row["tasks"] = list(row["tasks"] or []) + [_ref(made)]  # api3 070
         mock._log([_events.links_change(mock._event_user["name"], row["type"], row["id"], mock._row_name(row),
                                         "tasks", mock._display_name(row["type"], "tasks"),
                                         [mock._named_link(_ref(made))], [], in_create=True)], row)
