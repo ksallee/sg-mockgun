@@ -656,7 +656,8 @@ class TestFilterOperator(unittest.TestCase):
         shots = self._mockgun.find(
             *find_args, order=[{"field_name": "description", "direction": "asc"}]
         )
-        self.assertEqual([s["code"] for s in shots], ["shot2", "shot1", "shot3"])
+        # api3 025: None sorts last ascending and descending.
+        self.assertEqual([s["code"] for s in shots], ["shot1", "shot3", "shot2"])
 
         shots = self._mockgun.find(
             *find_args, order=[{"field_name": "description", "direction": "desc"}]
@@ -667,7 +668,8 @@ class TestFilterOperator(unittest.TestCase):
         shots = self._mockgun.find(
             *find_args, order=[{"field_name": "sg_cut_order", "direction": "asc"}]
         )
-        self.assertEqual([s["code"] for s in shots], ["shot3", "shot2", "shot1"])
+        # api3 025: None sorts last.
+        self.assertEqual([s["code"] for s in shots], ["shot2", "shot1", "shot3"])
 
         # float field
         users = self._mockgun.find(
@@ -676,7 +678,8 @@ class TestFilterOperator(unittest.TestCase):
             ["login"],
             order=[{"field_name": "password_strength", "direction": "asc"}],
         )
-        self.assertEqual([u["login"] for u in users], ["user2", "user1"])
+        # api3 025: None sorts last.
+        self.assertEqual([u["login"] for u in users], ["user1", "user2"])
 
         # date_time field
         users = self._mockgun.find(
@@ -685,7 +688,8 @@ class TestFilterOperator(unittest.TestCase):
             ["login"],
             order=[{"field_name": "created_at", "direction": "asc"}],
         )
-        self.assertEqual([u["login"] for u in users], ["user1", "user2"])
+        # api3 025: None sorts last.
+        self.assertEqual([u["login"] for u in users], ["user2", "user1"])
 
     def test_nested_filter_operators(self):
         """

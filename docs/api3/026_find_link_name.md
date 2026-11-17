@@ -53,7 +53,8 @@ A Note's display name is `<subject> - <content>`.
 ## Note.tasks
 
 Task elements of `Note.tasks` have a fourth key, `template_task_id`. Over 51 elements, 38 were null and 13 were an integer id.
+It equals the id of the Task's `template_task`, on 51 of 51.
 
 **Same as REST:** every link dict has `id`, `name`, `type`; `name` is the target's display name, single and multi entity (finding 060).
 **Differs from REST:** finding 060 does not record the HTML escaping of `cached_display_name`, the `<subject> - <content>` form, or `template_task_id` in `Note.tasks`.
-**Mock:** link dicts have `id`, `name`, `type` with `<subject> - <content>` for a Note, which matches. `Note.tasks` elements lack `template_task_id`. Reading the field `cached_display_name` on a Note with an apostrophe must return the escaped form; the mock does not model that.
+**Mock:** link dicts have `id`, `name`, `type` with `<subject> - <content>` for a Note, which matches. `Note.tasks` elements have `template_task_id`, from the Task's `template_task`. Reading the field `cached_display_name` on a Note with an apostrophe must return the escaped form; the mock does not model that.
