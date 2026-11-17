@@ -1,0 +1,1047 @@
+{
+ "date": "2026-11-17",
+ "site_version": "8.91.0",
+ "target": "live",
+ "tests": {
+  "tests/conformance/test_conf_attention.py::test_activity_stream_envelope": {
+   "api3": "048",
+   "cell": [
+    "activity_stream_read",
+    "-",
+    "-"
+   ],
+   "finding": "066",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_attention.py::test_activity_stream_refusals": {
+   "api3": "048",
+   "cell": [
+    "activity_stream_read",
+    "-",
+    "-"
+   ],
+   "finding": "066",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_attention.py::test_export_page_refusals": {
+   "api3": "052",
+   "cell": [
+    "export_page",
+    "-",
+    "-"
+   ],
+   "finding": "072",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_attention.py::test_followers_and_following_refusals": {
+   "api3": "049",
+   "cell": [
+    "followers",
+    "-",
+    "-"
+   ],
+   "finding": "066",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_attention.py::test_nav_expand_project_and_refusals": {
+   "api3": "050",
+   "cell": [
+    "nav_expand",
+    "-",
+    "-"
+   ],
+   "finding": "064",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_attention.py::test_nav_search_failures_are_dicts": {
+   "api3": "050",
+   "cell": [
+    "nav_search_string",
+    "-",
+    "-"
+   ],
+   "finding": "064",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_attention.py::test_note_thread_read_missing_note": {
+   "api3": "047",
+   "cell": [
+    "note_thread_read",
+    "-",
+    "-"
+   ],
+   "finding": "043",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_attention.py::test_note_thread_read_rows": {
+   "api3": "047",
+   "cell": [
+    "note_thread_read",
+    "-",
+    "-"
+   ],
+   "finding": "043",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_attention.py::test_preferences_read": {
+   "api3": "051",
+   "cell": [
+    "preferences_read",
+    "-",
+    "-"
+   ],
+   "finding": "047",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_attention.py::test_work_schedule_read": {
+   "api3": "051",
+   "cell": [
+    "work_schedule_read",
+    "-",
+    "-"
+   ],
+   "finding": "047",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_event_log.py::test_batch_logs_as_single_writes_do": {
+   "api3": "docs/api3-probe-2026-11-12.md",
+   "cell": null,
+   "finding": "049",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_event_log.py::test_create_logs_new_then_a_change_per_field": {
+   "api3": "docs/api3-probe-2026-11-12.md",
+   "cell": null,
+   "finding": "049",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_event_log.py::test_delete_and_revive": {
+   "api3": "docs/api3-probe-2026-11-12.md",
+   "cell": null,
+   "finding": "049",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_event_log.py::test_delete_drops_the_entity_link_from_earlier_rows": {
+   "api3": "docs/api3-probe-2026-11-12.md",
+   "cell": null,
+   "finding": "049",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_event_log.py::test_schema_writes_log_display_column_rows": {
+   "api3": "docs/api3-probe-2026-11-12.md",
+   "cell": [
+    "schema_field_update",
+    "-",
+    "text"
+   ],
+   "finding": "025",
+   "outcome": "skip"
+  },
+  "tests/conformance/test_conf_event_log.py::test_update_logs_only_changed_fields": {
+   "api3": "docs/api3-probe-2026-11-12.md",
+   "cell": null,
+   "finding": "025",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_filters.py::test_between_needs_two_values": {
+   "api3": "003",
+   "cell": [
+    "find",
+    "between",
+    "number"
+   ],
+   "finding": "field_types/number",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_filters.py::test_checkbox_is_none_is_refused": {
+   "api3": "005",
+   "cell": [
+    "find",
+    "is",
+    "checkbox"
+   ],
+   "finding": "field_types/checkbox",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_filters.py::test_dotted_path_reads_null_through_another_type": {
+   "api3": "012",
+   "cell": [
+    "find",
+    "is",
+    "dotted"
+   ],
+   "finding": "016",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_filters.py::test_entity_in_empty_list_fails_in_the_client": {
+   "api3": "015",
+   "cell": [
+    "find",
+    "in",
+    "entity"
+   ],
+   "finding": "field_types/multi_entity",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_filters.py::test_entity_name_is_none_is_refused": {
+   "api3": "010",
+   "cell": [
+    "find",
+    "name_is",
+    "entity"
+   ],
+   "finding": "field_types/entity",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_filters.py::test_entity_negations_match_the_unset_row": {
+   "api3": "010",
+   "cell": [
+    "find",
+    "is_not",
+    "entity"
+   ],
+   "finding": "field_types/entity",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_filters.py::test_entity_type_is_none_means_unset": {
+   "api3": "010",
+   "cell": [
+    "find",
+    "type_is",
+    "entity"
+   ],
+   "finding": "field_types/entity",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_filters.py::test_multi_entity_in_and_not_in": {
+   "api3": "011",
+   "cell": [
+    "find",
+    "in",
+    "multi_entity"
+   ],
+   "finding": "field_types/multi_entity",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_filters.py::test_multi_entity_is_takes_one_entity": {
+   "api3": "011",
+   "cell": [
+    "find",
+    "is",
+    "multi_entity"
+   ],
+   "finding": "field_types/multi_entity",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_filters.py::test_multi_entity_name_not_contains_matches_the_empty_row": {
+   "api3": "011",
+   "cell": [
+    "find",
+    "name_not_contains",
+    "multi_entity"
+   ],
+   "finding": "field_types/multi_entity",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_filters.py::test_not_between_is_refused": {
+   "api3": "002",
+   "cell": [
+    "find",
+    "not_between",
+    "number"
+   ],
+   "finding": "017",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_filters.py::test_relative_date_operators": {
+   "api3": "014",
+   "cell": [
+    "find",
+    "in_last",
+    "date_time"
+   ],
+   "finding": "field_types/date_time",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_filters.py::test_relative_date_refusals": {
+   "api3": "014",
+   "cell": [
+    "find",
+    "in_last",
+    "date_time"
+   ],
+   "finding": "field_types/date_time",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_filters.py::test_text_and_status_is_ignore_case": {
+   "api3": "004",
+   "cell": [
+    "find",
+    "is",
+    "status_list"
+   ],
+   "finding": "field_types/text",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_filters.py::test_unknown_field_is_refused_beside_an_empty_match": {
+   "api3": "013",
+   "cell": [
+    "find",
+    "is",
+    "unknown field"
+   ],
+   "finding": "028",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_filters.py::test_unknown_relation_on_text_lists_the_valid_relations": {
+   "api3": "001",
+   "cell": [
+    "find",
+    "unknown relation",
+    "text"
+   ],
+   "finding": "017",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_filters.py::test_url_cannot_be_used_in_a_filter": {
+   "api3": "001",
+   "cell": [
+    "find",
+    "unknown relation",
+    "url"
+   ],
+   "finding": "017",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_options.py::test_a_link_to_a_retired_row_reads_null_and_comes_back": {
+   "api3": "027",
+   "cell": [
+    "find",
+    "-",
+    "multi_entity"
+   ],
+   "finding": "060",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_options.py::test_archived_projects_drop_out": {
+   "api3": "022",
+   "cell": [
+    "find",
+    "include_archived_projects",
+    "-"
+   ],
+   "finding": "018",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_options.py::test_entity_sorts_and_none_stays_last": {
+   "api3": "025",
+   "cell": [
+    "find",
+    "order",
+    "entity"
+   ],
+   "finding": "026",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_options.py::test_latest_keeps_the_newest_version_per_entity": {
+   "api3": "023",
+   "cell": [
+    "find",
+    "additional_filter_presets",
+    "-"
+   ],
+   "finding": "none",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_options.py::test_limit_zero_is_no_limit": {
+   "api3": "020",
+   "cell": [
+    "find",
+    "limit",
+    "-"
+   ],
+   "finding": "082",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_options.py::test_link_dicts_carry_the_display_name": {
+   "api3": "026",
+   "cell": [
+    "find",
+    "-",
+    "entity"
+   ],
+   "finding": "060",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_options.py::test_negative_limit_and_page_fail_in_the_client": {
+   "api3": "020",
+   "cell": [
+    "find",
+    "limit",
+    "-"
+   ],
+   "finding": "082",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_options.py::test_none_sorts_last_both_ways": {
+   "api3": "025",
+   "cell": [
+    "find",
+    "order",
+    "text"
+   ],
+   "finding": "026",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_options.py::test_order_input_forms": {
+   "api3": "024",
+   "cell": [
+    "find",
+    "order",
+    "-"
+   ],
+   "finding": "026",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_options.py::test_retired_only_returns_only_retired_rows": {
+   "api3": "021",
+   "cell": [
+    "find",
+    "retired_only",
+    "-"
+   ],
+   "finding": "060",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_options.py::test_retirement_date_cannot_be_filtered": {
+   "api3": "021",
+   "cell": [
+    "find",
+    "is_not",
+    "retirement_date"
+   ],
+   "finding": "060",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_options.py::test_status_list_sorts_by_valid_values": {
+   "api3": "024",
+   "cell": [
+    "find",
+    "order",
+    "status_list"
+   ],
+   "finding": "026",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_options.py::test_unknown_preset_is_refused": {
+   "api3": "023",
+   "cell": [
+    "find",
+    "additional_filter_presets",
+    "-"
+   ],
+   "finding": "none",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_text.py::test_contains": {
+   "api3": null,
+   "cell": [
+    "find",
+    "contains",
+    "text"
+   ],
+   "finding": "017",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_text.py::test_ends_with": {
+   "api3": null,
+   "cell": [
+    "find",
+    "ends_with",
+    "text"
+   ],
+   "finding": "017",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_text.py::test_in": {
+   "api3": null,
+   "cell": [
+    "find",
+    "in",
+    "text"
+   ],
+   "finding": "017",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_text.py::test_is": {
+   "api3": null,
+   "cell": [
+    "find",
+    "is",
+    "text"
+   ],
+   "finding": "017",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_text.py::test_is_not": {
+   "api3": null,
+   "cell": [
+    "find",
+    "is_not",
+    "text"
+   ],
+   "finding": "017",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_text.py::test_not_contains": {
+   "api3": null,
+   "cell": [
+    "find",
+    "not_contains",
+    "text"
+   ],
+   "finding": "017",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_text.py::test_not_in": {
+   "api3": null,
+   "cell": [
+    "find",
+    "not_in",
+    "text"
+   ],
+   "finding": "017",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_find_text.py::test_starts_with": {
+   "api3": null,
+   "cell": [
+    "find",
+    "starts_with",
+    "text"
+   ],
+   "finding": "017",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_media.py::test_attachment_download_url": {
+   "api3": "057",
+   "cell": [
+    "get_attachment_download_url",
+    "-",
+    "-"
+   ],
+   "finding": "none",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_media.py::test_download_of_a_missing_attachment": {
+   "api3": "056",
+   "cell": [
+    "download_attachment",
+    "-",
+    "-"
+   ],
+   "finding": "039",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_media.py::test_download_returns_the_bytes_sent": {
+   "api3": "056",
+   "cell": [
+    "download_attachment",
+    "-",
+    "-"
+   ],
+   "finding": "039",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_media.py::test_share_from_a_version_without_image": {
+   "api3": "058",
+   "cell": [
+    "share_thumbnail",
+    "-",
+    "image"
+   ],
+   "finding": "none",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_media.py::test_thumbnail_is_transient_and_not_shareable_yet": {
+   "api3": "055",
+   "cell": [
+    "upload_thumbnail",
+    "-",
+    "image"
+   ],
+   "finding": "013",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_media.py::test_upload_to_a_movie_field_returns_the_attachment": {
+   "api3": "053",
+   "cell": [
+    "upload",
+    "-",
+    "url"
+   ],
+   "finding": "014",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_media.py::test_upload_to_a_text_field_is_refused": {
+   "api3": "054",
+   "cell": [
+    "upload",
+    "-",
+    "text"
+   ],
+   "finding": "013",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_media.py::test_upload_without_a_field_links_an_attachment": {
+   "api3": "053",
+   "cell": [
+    "upload",
+    "-",
+    "-"
+   ],
+   "finding": "014",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_records.py::test_batch_results_in_request_order": {
+   "api3": "063",
+   "cell": [
+    "batch",
+    "-",
+    "-"
+   ],
+   "finding": "028",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_records.py::test_batch_rolls_back_when_a_request_fails": {
+   "api3": "063",
+   "cell": [
+    "batch",
+    "-",
+    "-"
+   ],
+   "finding": "028",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_records.py::test_create_needs_a_project_and_a_field": {
+   "api3": "060",
+   "cell": [
+    "create",
+    "-",
+    "-"
+   ],
+   "finding": "012",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_records.py::test_omitted_code_is_generated_and_empty_code_refused": {
+   "api3": "060",
+   "cell": [
+    "create",
+    "-",
+    "text"
+   ],
+   "finding": "012",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_records.py::test_project_scope_keeps_valid_values": {
+   "api3": "064",
+   "cell": [
+    "schema_field_read",
+    "-",
+    "status_list"
+   ],
+   "finding": "115",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_records.py::test_status_outside_the_list_is_refused": {
+   "api3": "062",
+   "cell": [
+    "create",
+    "-",
+    "status_list"
+   ],
+   "finding": "094",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_records.py::test_task_delete_nulls_version_sg_task_and_revive_restores_it": {
+   "api3": "065",
+   "cell": [
+    "delete",
+    "-",
+    "entity"
+   ],
+   "finding": "089",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_round_trips.py::test_batch_create_update_delete": {
+   "api3": null,
+   "cell": [
+    "batch",
+    "-",
+    "-"
+   ],
+   "finding": "024",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_round_trips.py::test_create_returns_what_was_sent_and_reads_back": {
+   "api3": null,
+   "cell": [
+    "create",
+    "-",
+    "text"
+   ],
+   "finding": "024",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_round_trips.py::test_delete_hides_the_row_from_find": {
+   "api3": null,
+   "cell": [
+    "delete",
+    "-",
+    "-"
+   ],
+   "finding": "024",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_round_trips.py::test_revive_brings_back_the_values_the_row_had": {
+   "api3": null,
+   "cell": [
+    "revive",
+    "-",
+    "-"
+   ],
+   "finding": "048",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_round_trips.py::test_revive_of_a_live_row_does_nothing": {
+   "api3": null,
+   "cell": [
+    "revive",
+    "-",
+    "-"
+   ],
+   "finding": "048",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_round_trips.py::test_update_reads_back": {
+   "api3": null,
+   "cell": [
+    "update",
+    "-",
+    "text"
+   ],
+   "finding": "024",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_schema_fields.py::test_a_deleted_field_keeps_its_code_taken": {
+   "api3": "docs/api3-probe-2026-11-12.md",
+   "cell": [
+    "schema_field_delete",
+    "-",
+    "text"
+   ],
+   "finding": "040",
+   "outcome": "skip"
+  },
+  "tests/conformance/test_conf_schema_fields.py::test_a_taken_display_name_is_suffixed": {
+   "api3": "docs/api3-probe-2026-11-12.md",
+   "cell": [
+    "schema_field_create",
+    "-",
+    "number"
+   ],
+   "finding": "019",
+   "outcome": "skip"
+  },
+  "tests/conformance/test_conf_schema_fields.py::test_code_is_sg_and_the_lowercased_display_name": {
+   "api3": "docs/api3-probe-2026-11-12.md",
+   "cell": [
+    "schema_field_create",
+    "-",
+    "text"
+   ],
+   "finding": "019",
+   "outcome": "skip"
+  },
+  "tests/conformance/test_conf_schema_fields.py::test_data_type_cannot_be_updated": {
+   "api3": "docs/api3-probe-2026-11-12.md",
+   "cell": [
+    "schema_field_update",
+    "-",
+    "text"
+   ],
+   "finding": "040",
+   "outcome": "skip"
+  },
+  "tests/conformance/test_conf_summarize_search.py::test_empty_match_and_duplicate_field": {
+   "api3": "040",
+   "cell": [
+    "summarize",
+    "-",
+    "number"
+   ],
+   "finding": "020",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_summarize_search.py::test_grouping_by_status": {
+   "api3": "041",
+   "cell": [
+    "summarize",
+    "grouping",
+    "status_list"
+   ],
+   "finding": "079",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_summarize_search.py::test_grouping_nests_and_empty_group_is_last": {
+   "api3": "041",
+   "cell": [
+    "summarize",
+    "grouping",
+    "entity"
+   ],
+   "finding": "079",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_summarize_search.py::test_status_percentage_is_the_share_in_that_status": {
+   "api3": "040",
+   "cell": [
+    "summarize",
+    "-",
+    "status_list"
+   ],
+   "finding": "079",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_summarize_search.py::test_summaries_without_grouping": {
+   "api3": "040",
+   "cell": [
+    "summarize",
+    "-",
+    "number"
+   ],
+   "finding": "020",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_summarize_search.py::test_summary_type_must_fit_the_data_type": {
+   "api3": "042",
+   "cell": [
+    "summarize",
+    "-",
+    "text"
+   ],
+   "finding": "020",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_summarize_search.py::test_text_search_matches_substrings_and_links": {
+   "api3": "044",
+   "cell": [
+    "text_search",
+    "-",
+    "-"
+   ],
+   "finding": "053",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_summarize_search.py::test_text_search_refusals": {
+   "api3": "045",
+   "cell": [
+    "text_search",
+    "-",
+    "-"
+   ],
+   "finding": "053",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_summarize_search.py::test_text_search_rows_and_terms": {
+   "api3": "043",
+   "cell": [
+    "text_search",
+    "-",
+    "-"
+   ],
+   "finding": "046",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_templates.py::test_a_start_date_write_pins_and_flags_a_violation": {
+   "api3": "072",
+   "cell": [
+    "update",
+    "-",
+    "date"
+   ],
+   "finding": "093",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_templates.py::test_create_with_a_template_makes_its_tasks_and_edges": {
+   "api3": "070",
+   "cell": [
+    "create",
+    "task_template",
+    "entity"
+   ],
+   "finding": "083",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_templates.py::test_generated_tasks_log_a_template_task_row": {
+   "api3": "074",
+   "cell": [
+    "create",
+    "task_template",
+    "event_log"
+   ],
+   "finding": "090",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_templates.py::test_reapply_adds_only_the_missing_tasks": {
+   "api3": "071",
+   "cell": [
+    "update",
+    "task_template",
+    "entity"
+   ],
+   "finding": "084",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_templates.py::test_task_delete_retires_its_edges_and_revive_restores_them": {
+   "api3": "073",
+   "cell": [
+    "delete",
+    "-",
+    "-"
+   ],
+   "finding": "089",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_templates.py::test_upstream_dates_move_the_downstream_task": {
+   "api3": "072",
+   "cell": [
+    "update",
+    "-",
+    "date"
+   ],
+   "finding": "092",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_writes.py::test_checkbox_takes_only_booleans": {
+   "api3": "031",
+   "cell": [
+    "update",
+    "-",
+    "checkbox"
+   ],
+   "finding": "field_types/checkbox",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_writes.py::test_create_returns_the_fields_sent": {
+   "api3": "038",
+   "cell": [
+    "create",
+    "-",
+    "entity"
+   ],
+   "finding": "024",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_writes.py::test_created_at_is_editable_on_create_only": {
+   "api3": "038",
+   "cell": [
+    "update",
+    "-",
+    "date_time"
+   ],
+   "finding": "024",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_writes.py::test_dotted_update_writes_the_linked_row": {
+   "api3": "039",
+   "cell": [
+    "update",
+    "-",
+    "dotted"
+   ],
+   "finding": "024",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_writes.py::test_float_refuses_int_and_rounds_to_six_places": {
+   "api3": "032",
+   "cell": [
+    "update",
+    "-",
+    "float"
+   ],
+   "finding": "field_types/float",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_writes.py::test_multi_entity_refuses_none_and_clears_on_empty_list": {
+   "api3": "034",
+   "cell": [
+    "update",
+    "-",
+    "multi_entity"
+   ],
+   "finding": "field_types/multi_entity",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_writes.py::test_note_meta_is_create_only": {
+   "api3": "035",
+   "cell": [
+    "update",
+    "-",
+    "jsonb"
+   ],
+   "finding": "field_types/jsonb",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_writes.py::test_number_is_signed_32_bit_and_refuses_strings": {
+   "api3": "033",
+   "cell": [
+    "update",
+    "-",
+    "number"
+   ],
+   "finding": "field_types/number",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_writes.py::test_read_only_types_refuse_writes": {
+   "api3": "036",
+   "cell": [
+    "update",
+    "-",
+    "summary"
+   ],
+   "finding": "field_types/summary",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_writes.py::test_task_color": {
+   "api3": "035",
+   "cell": [
+    "update",
+    "-",
+    "color"
+   ],
+   "finding": "field_types/color",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_writes.py::test_text_is_stripped_and_blank_stores_null": {
+   "api3": "030",
+   "cell": [
+    "update",
+    "-",
+    "text"
+   ],
+   "finding": "field_types/text",
+   "outcome": "pass"
+  },
+  "tests/conformance/test_conf_writes.py::test_unknown_field_refuses_the_write": {
+   "api3": "039",
+   "cell": [
+    "update",
+    "-",
+    "unknown field"
+   ],
+   "finding": "028",
+   "outcome": "pass"
+  }
+ }
+}

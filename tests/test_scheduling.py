@@ -52,6 +52,12 @@ def test_own_write_start_on_a_dependent_pins_and_holds_duration():
     assert S.own_write(old, {"start_date": "2026-03-04"}, True, WEEK) == {"due_date": "2026-03-12", "pinned": True}
 
 
+def test_own_write_of_the_stored_start_does_not_pin():
+    # finding 093; live conformance run: a write of the stored start_date leaves pinned False
+    old = task("2026-03-04", "2026-03-05", 960)
+    assert S.own_write(old, {"start_date": "2026-03-04"}, True, WEEK) == {}
+
+
 def test_own_write_start_null_pins_and_keeps_due():
     # finding 093
     old = task("2026-03-04", "2026-03-05", 960)
