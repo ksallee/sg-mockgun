@@ -20,19 +20,20 @@ _FixtureShotgun.set_schema_paths(*schemas.paths())
 def make_sg():
     """A new instance on the bundled schema with a clock that starts at ``CLOCK_START``."""
     sg = _FixtureShotgun("https://mock.example.com", script_name="pytest", api_key="pytest")
-    sg.set_clock(_ticking_clock())
+    sg.set_clock(_TickingClock())
     return sg
 
 
-def _ticking_clock():
-    ticks = [0]
+class _TickingClock(object):
+    """A clock that starts at ``CLOCK_START`` and advances one second per reading."""
 
-    def clock():
-        now = CLOCK_START + datetime.timedelta(seconds=ticks[0])
-        ticks[0] += 1
+    def __init__(self):
+        self.ticks = 0
+
+    def __call__(self):
+        now = CLOCK_START + datetime.timedelta(seconds=self.ticks)
+        self.ticks += 1
         return now
-
-    return clock
 
 
 @pytest.fixture
