@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from shotgun_api3 import ShotgunError
 
-from . import wire
+from . import attention, wire
 from .mockgun import FieldReviveError, Shotgun
 from . import schemas
 
@@ -191,6 +191,40 @@ class Site:
     def m_schema_field_delete(self, params):
         return self.mock.schema_field_delete(params["type"], params["field_name"])
 
+
+    # attention, navigation and site reads (sg_mockgun.attention, api3 047 to 052)
+    def m_note_thread_contents(self, params):
+        return attention.note_thread_contents(self.mock, params.get("note_id"), params.get("entity_fields") or {})
+
+    def m_activity_stream(self, params):
+        return attention.activity_stream(
+            self.mock, params.get("type"), params.get("id"), params.get("entity_fields") or {},
+            params.get("min_id"), params.get("max_id"), params.get("limit"))
+
+    def m_followers(self, params):
+        return attention.followers(self.mock, params.get("entity"))
+
+    def m_following(self, params):
+        return attention.following(self.mock, params)
+
+    def m_nav_expand(self, params):
+        return attention.nav_expand(self.mock, params.get("path"), params.get("seed_entity_field"),
+                                    params.get("entity_fields"))
+
+    def m_nav_search(self, params):
+        return attention.nav_search(self.mock, params.get("root_path"), params.get("search_criteria") or {})
+
+    def m_preferences_read(self, params):
+        return attention.preferences_read(self.mock, params.get("prefs", []))
+
+    def m_work_schedule_read(self, params):
+        return attention.work_schedule_read(self.mock, params)
+
+    def m_user_subscriptions_read(self, params):
+        return self.mock.user_subscriptions_read()
+
+    def m_export_page(self, params):
+        return attention.export_page(self.mock, params)
 
 def rest_error(status, title):
     # Status and title are recorded; the site's numeric "code" for these is not, so it is left out.
