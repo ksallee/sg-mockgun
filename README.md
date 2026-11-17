@@ -122,6 +122,8 @@ it ships with the client's own licence and covers the common production entities
     Shotgun.set_schema_paths(*schemas.paths())
     sg = Shotgun("https://mock.example.com", script_name="x", api_key="y")
 
+`sg.set_info(**values)` changes keys of the payload `info()`, `server_info` and `server_caps` read.
+
 ## Testing with pytest
 
 Installing sg-mockgun registers a pytest plugin. The `sg` fixture is a fresh instance per test on
@@ -178,7 +180,8 @@ Differences from upstream:
     sg = shotgun_api3.Shotgun("http://localhost:8080", script_name="any", api_key="any")
 
 One mockgun instance behind the api3 JSON protocol: `info`, `read` with paging, `create`, `update`,
-`delete`, `revive`, `batch` and the `schema_*` calls. Any script name and key are accepted, and the
+`delete`, `revive`, `batch`, `summarize`, `query_display_name_cache` (`text_search`) and the
+`schema_*` calls. Any script name and key are accepted, and the
 script name is the event log's user. Faults come back in the site's `exception` envelope; any other
 method answers `Error: API method "<name>" is not permitted.`, as a site does. Calls are serialised
 under one lock.
