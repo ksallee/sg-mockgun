@@ -1,7 +1,7 @@
 """Filters on dotted paths through entity and multi_entity fields."""
 
 import pytest
-from shotgun_api3 import ShotgunError
+from shotgun_api3 import Fault, ShotgunError
 
 from sg_mockgun import Shotgun, schemas
 
@@ -52,7 +52,7 @@ def test_positive_dotted_filters_through_multi_entity_match(sg, notes):
 
 def test_is_not_null_two_hops_through_multi_entity_matches_linked_rows(sg, notes):
     # finding 016: note_links.Shot.sg_sequence.Sequence.code is_not null matched linked Notes.
-    # Rows with no Shot link are unmeasured and do not match.
+    # api3 012: rows with no Shot link read null.
     rows = sg.find("Note", [["note_links.Shot.sg_sequence.Sequence.code", "is_not", None]])
     assert ids(rows) == [notes["shot"]["id"]]
 
@@ -65,9 +65,10 @@ def test_is_not_null_two_hops_through_multi_entity_matches_linked_rows(sg, notes
 ])
 def test_dotted_path_the_named_type_lacks_is_refused(sg, notes, path):
     # finding 016: the path is validated against the named type, not the link's valid_types.
-    with pytest.raises(ShotgunError) as err:
+    # api3 013: the wording.
+    with pytest.raises(Fault) as err:
         sg.find("Note", [[path, "contains", "bunn"]])
-    assert str(err.value) == "Note.%s doesn't exist." % path
+    assert str(err.value).startswith("API read() Note.%s doesn't exist:\n{" % path)
 
 
 def test_cached_display_name_through_multi_entity_is_accepted(sg, notes):
