@@ -5,6 +5,8 @@ Writes, with `--write`, in the sandbox project: a Sequence, a Shot in it, an Ass
 (entity set to the Shot, to the Asset, unset) and three Notes (note_links to the Shot, to the Asset,
 none). No Note is addressed to anyone. Every row is deleted at the end.
 
+The `in []` cases on Version.entity are read-only.
+
 Answers are labels of the rows each filter matched, scoped to those rows, or the exception raised.
 """
 import sys
@@ -142,6 +144,16 @@ def payloads():
     return out
 
 
+def empty_list_answers(sg):
+    """`in []` and `not_in []` on the single entity field Version.entity, with and without api3's optimisation."""
+    out = {}
+    for op in ("in", "not_in"):
+        filters = [["entity", op, []]]
+        out["entity %s []" % op] = _lib.ask(sg.find, "Version", filters, ["id"])
+        out["entity %s [], optimisation off" % op] = unoptimized(sg.find, "Version", filters, ["id"])
+    return out
+
+
 def matched(sg, entity_type, scope, filters, labels):
     """Row labels a filter matched within the scope, or the exception."""
     answer = _lib.ask(sg.find, entity_type, scope + filters, ["id"])
@@ -162,10 +174,11 @@ def unoptimized(fn, *args):
 def main():
     env = _lib.load_env()
     answers = {"payloads": payloads()}
-    if not _lib.writes_allowed():
-        _lib.emit("010_filter_links (payloads only, run with --write)", answers, env)
-        return
     sg = _lib.client(env)
+    answers["entity empty list"] = empty_list_answers(sg)
+    if not _lib.writes_allowed():
+        _lib.emit("010_filter_links (read-only part, run with --write for the rest)", answers, env, sg)
+        return
     project = _lib.sandbox(sg, env)
     with _lib.Created(sg) as made:
         seq = made.add(sg.create("Sequence", {"project": project, "code": PREFIX + "seq"}))

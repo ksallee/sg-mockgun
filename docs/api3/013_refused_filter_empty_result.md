@@ -22,6 +22,9 @@ The site validates every condition before it reads a row.
 
 **Same as REST:** the messages, with `read()` in place of `summarize()` for the Booking path (finding 016).
 **Differs from REST:** nothing. REST did not measure a refused filter beside an empty match.
-**Mock:** the mock returns `[]` for each AND case: it checks a condition only against a row, and no row
-passes `id is 0`. Only the `any` case raises, as `ShotgunError` `Note.note_links.Booking.code doesn't
-exist.`. The mock must validate every condition before matching, and raise `Fault` with the site text.
+**Mock:** dev validates conditions before the scan. It raises for `bogus_op` on entity and multi_entity,
+for `name_is None` and for the Booking path, in the AND and the `any` case. Two gaps remain. An unknown
+plain field, `["zz_nope", "is", "x"]`, returns `[]` and must raise `Fault` `API read() Version.zz_nope doesn't
+exist:` + the condition. Each refusal is `ShotgunError` with shorter text (no condition hash, `. Valid
+relations:` on one line, `Note.note_links.Booking.code doesn't exist.` without `API read()`); it must be
+`Fault` with the site text.
