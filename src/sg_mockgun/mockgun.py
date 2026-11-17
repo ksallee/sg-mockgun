@@ -123,6 +123,7 @@ from shotgun_api3.shotgun import _Config
 from .errors import MockgunError
 from .schema import SchemaFactory
 from . import events as _events
+from . import seed as _seed
 from .fields import CREATABLE_TYPES, UPDATABLE_PROPERTIES, field_code, new_field, ruby_inspect, ruby_list, ruby_params
 
 def _same_link(a, b):
@@ -1212,3 +1213,18 @@ class Shotgun(object):
     def _validate_entity_exists(self, entity_type, entity_id):
         if entity_id not in self._db[entity_type]:
             raise ShotgunError("No entity of type %s exists with id %s" % (entity_type, entity_id))
+
+    ###################################################################################################
+    # seeding and snapshots (sg_mockgun.seed)
+
+    def load(self, source):
+        """Add the records in a seed file, or an already parsed dict, without event log rows."""
+        _seed.load(self, source)
+
+    def snapshot(self):
+        """A copy of this instance's records and schema, for ``restore``."""
+        return _seed.snapshot(self)
+
+    def restore(self, state):
+        """Put this instance's records and schema back to a ``snapshot``."""
+        _seed.restore(self, state)

@@ -10,6 +10,9 @@ dependencies = ["shotgun-api3>=3.10.5"]
 [project.scripts]
 sg-mockgun = "sg_mockgun.server:main"
 
+[project.entry-points.pytest11]
+sg_mockgun = "sg_mockgun.pytest_plugin"
+
 [dependency-groups]
 dev = ["pytest>=8"]
 
