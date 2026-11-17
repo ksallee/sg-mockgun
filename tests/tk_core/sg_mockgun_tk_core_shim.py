@@ -12,6 +12,14 @@ import sys
 
 import pytest
 
+# tk-core tests that rely on behaviour a site does not have. Each one is an expected failure, with the
+# answer that contradicts it. strict: a pass means the entry is stale.
+SITE_CONTRADICTS = {
+    "tests/core_tests/test_path_cache.py::TestPathCacheDelete::test_unregister_multiple_folders":
+        "create('Shot', {'code': ...}) with no project. A site refuses it: "
+        "\"API create() missing 'project' attribute\" (api3 060).",
+}
+
 _ALIASES = (
     "shotgun_api3.lib.mockgun",
     "tank_vendor.shotgun_api3.lib.mockgun",
@@ -45,6 +53,14 @@ def pytest_configure(config):
 
     if os.environ.get("SG_MOCKGUN_EVENT_LOG") == "0":
         _turn_off_event_log(sg_mockgun.Shotgun)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Mark each test in SITE_CONTRADICTS as a strict expected failure."""
+    for item in items:
+        reason = SITE_CONTRADICTS.get(item.nodeid)
+        if reason:
+            item.add_marker(pytest.mark.xfail(reason=reason, strict=True))
 
 
 def _turn_off_event_log(cls):

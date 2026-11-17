@@ -333,3 +333,18 @@ def test_note_tasks_carry_template_task_id(sg):
         {"type": "Task", "id": from_template["id"], "name": "a", "template_task_id": 999},
         {"type": "Task", "id": plain["id"], "name": "b", "template_task_id": None},
     ]
+
+
+def test_find_one_calls_find_as_upstream_mockgun_does(sg, monkeypatch):
+    # Callers that patch find assert upstream mockgun's keyword arguments.
+    calls = []
+    monkeypatch.setattr(sg, "find", lambda *args, **kwargs: calls.append((args, kwargs)) or [])
+    sg.find_one("Shot", [["id", "is", 1]], ["code"])
+    sg.find_one("Shot", [], include_archived_projects=False, additional_filter_presets=[])
+    assert calls == [
+        (("Shot", [["id", "is", 1]]),
+         {"fields": ["code"], "order": None, "filter_operator": None, "retired_only": False}),
+        (("Shot", []),
+         {"fields": None, "order": None, "filter_operator": None, "retired_only": False,
+          "include_archived_projects": False, "additional_filter_presets": []}),
+    ]

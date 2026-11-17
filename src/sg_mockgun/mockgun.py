@@ -604,11 +604,15 @@ class Shotgun(object):
         self, entity_type, filters, fields=None, order=None, filter_operator=None,
         retired_only=False, include_archived_projects=True, additional_filter_presets=None,
     ):
+        # Upstream mockgun passes these four keywords. Callers that patch find assert them.
+        options = {}
+        if include_archived_projects is not True:
+            options["include_archived_projects"] = include_archived_projects
+        if additional_filter_presets is not None:
+            options["additional_filter_presets"] = additional_filter_presets
         results = self.find(
             entity_type, filters, fields=fields,
-            order=order, filter_operator=filter_operator, limit=1, retired_only=retired_only,
-            include_archived_projects=include_archived_projects,
-            additional_filter_presets=additional_filter_presets,
+            order=order, filter_operator=filter_operator, retired_only=retired_only, **options
         )
         return results[0] if results else None
 
@@ -649,6 +653,15 @@ class Shotgun(object):
         rows = [row for row in self._db[entity_type].values() if row["__retired"] == bool(retired_only)]
         return _reads.latest_ids(rows, group, rank)
 
+    def _client_datetimes(self, entity_type, data):
+        """Return data with each date_time value made aware as the client sends it."""
+        convert = self.config.convert_datetimes_to_utc
+        return dict(
+            (field, _wire.client_datetime(value, convert) if self._field_type_or_none(entity_type, field) == "date_time"
+             else value)
+            for field, value in data.items()
+        )
+
     def _sort_value(self, entity_type, row, field):
         """The value a sort compares for one field of a row (api3 024, api3 025)."""
         value = self._get_field_from_row(entity_type, row, field)
@@ -664,6 +677,8 @@ class Shotgun(object):
         if field_type == "multi_entity" and isinstance(value, list):
             # multi_entity sort order unprobed (sg-mockgun#39)
             return tuple(link["name"] or "" for link in map(self._live_link, value) if link) or None
+        if field_type == "date_time":
+            return _wire.client_datetime(value, self.config.convert_datetimes_to_utc)
         return value
 
     def _in_archived_project(self, row):
@@ -719,6 +734,7 @@ class Shotgun(object):
         data = dict(data)
         upload_image = data.pop("image", None)  # api3 035: the client never sends image on create
         data = self._validate_entity_data(entity_type, data, "create")
+        data = self._client_datetimes(entity_type, data)
         data = self._check_status(entity_type, data, "create")
         self._validate_entity_fields(entity_type, return_fields)
         next_id = self._next_id(entity_type)
@@ -768,6 +784,7 @@ class Shotgun(object):
         dotted = dict((field, data.pop(field)) for field in list(data) if "." in field)
         self._validate_entity_fields(entity_type, dotted.keys())
         data = self._validate_entity_data(entity_type, data)
+        data = self._client_datetimes(entity_type, data)
         data = self._check_status(entity_type, data, "update")
         self._validate_entity_exists(entity_type, entity_id, "update")
         _taskflow.before_update(self, entity_type, data)
@@ -1260,6 +1277,13 @@ class Shotgun(object):
                 return lval != rval
         elif field_type in ("float", "number", "percent", "duration", "timecode", "date", "date_time"):
             is_date = field_type in ("date", "date_time")
+            if field_type == "date_time":
+                convert = self.config.convert_datetimes_to_utc
+                lval = _wire.client_datetime(lval, convert)
+                if isinstance(rval, (list, tuple)):
+                    rval = [_wire.client_datetime(v, convert) for v in rval]
+                else:
+                    rval = _wire.client_datetime(rval, convert)
             # api3 014
             if is_date and (operator in RELATIVE or operator in CALENDAR):
                 return relative_match(lval, operator, filter_values(rval), self._clock(), field_type == "date")
@@ -1858,15 +1882,38 @@ class Shotgun(object):
     def close(self):
         """Do what the client's close does when no connection is open: nothing."""
 
+    # Upstream mockgun has neither attribute and its callers assign both, so an assigned value wins.
+    # The client builds both from one info() payload: server_caps follows an assigned server_info.
     @property
     def server_info(self):
-        """The ``info()`` payload."""
-        return self.server_caps.server_info
+        """The assigned value, else the ``info()`` payload."""
+        if "_server_info" in self.__dict__:
+            return self.__dict__["_server_info"]
+        return self.info()
+
+    @server_info.setter
+    def server_info(self, value):
+        self.__dict__["_server_info"] = value
+
+    @server_info.deleter
+    def server_info(self):
+        self.__dict__.pop("_server_info", None)
 
     @property
     def server_caps(self):
-        """The client's ``ServerCapabilities`` built from ``info()``, as ``shotgun_api3`` builds it."""
-        return ServerCapabilities(self.config.server, self.info())
+        """The assigned value, else the client's ``ServerCapabilities`` built from ``server_info``."""
+        if "_server_caps" in self.__dict__:
+            return self.__dict__["_server_caps"]
+        info = self.__dict__.get("_server_info")
+        return ServerCapabilities(self.config.server, info if isinstance(info, dict) else self.info())
+
+    @server_caps.setter
+    def server_caps(self, value):
+        self.__dict__["_server_caps"] = value
+
+    @server_caps.deleter
+    def server_caps(self):
+        self.__dict__.pop("_server_caps", None)
 
     def _field_type_or_none(self, entity_type, field):
         if not isinstance(field, str):

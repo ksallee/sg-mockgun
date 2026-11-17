@@ -69,6 +69,20 @@ def to_python(value, data_type):
     return value
 
 
+def client_datetime(value, convert_to_utc):
+    """A datetime as the client sends it: a naive one is local time, or UTC when conversion is off.
+
+    shotgun_api3 ``_transform_outbound`` attaches the local zone to a naive datetime when
+    ``convert_datetimes_to_utc`` is set, and sends it as UTC otherwise.
+    """
+    if not isinstance(value, datetime.datetime) or value.tzinfo is not None:
+        return value
+    if convert_to_utc:
+        from shotgun_api3.shotgun import SG_TIMEZONE
+        return value.replace(tzinfo=SG_TIMEZONE.local)
+    return value.replace(tzinfo=datetime.timezone.utc)
+
+
 def to_wire(value):
     """Mockgun results -> JSON-safe values; datetimes in UTC as the client parses them."""
     if isinstance(value, datetime.datetime):
