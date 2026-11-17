@@ -1,0 +1,41 @@
+# Runs tk-core's test suite against sg-mockgun, with the event log off and then on.
+# tk-core is cloned at the commit pinned in tools/run_tk_core.py. Its licence is not BSD, so none of
+# its files are copied into this repo.
+
+name: tk-core
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tk-core:
+    name: tk-core suite, Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.10", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+
+      # setup-python has no 3.9 build for this runner image. uv installs any version.
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Create a Python ${{ matrix.python }} environment with pip
+        run: |
+          uv venv --seed --python ${{ matrix.python }} "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Run tk-core's suite
+        run: python tools/run_tk_core.py
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tk-core-results-${{ matrix.python }}
+          path: .tk-core/results-*.xml

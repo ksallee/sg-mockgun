@@ -91,3 +91,67 @@ def new_field(entity_type, data_type, display_name, properties=None):
         "unique": rw(False),
         "visible": rw(True),
     }
+
+
+class Sym(str):
+    """A Ruby symbol, printed ``:name`` by ``ruby_pp``."""
+
+
+def _pp_doc(value):
+    """The layout tree Ruby's ``pp`` builds for a value: text, breakable and indented groups."""
+    def seplist(items, render):
+        doc = []
+        for i, item in enumerate(items):
+            if i:
+                doc += [("text", ","), ("break",)]
+            doc += render(item)
+        return doc
+
+    if isinstance(value, dict):
+        def pair(kv):
+            return [("group", 0, [_pp_doc(kv[0]), ("text", " =>"), ("group", 1, [("break",), _pp_doc(kv[1])])])]
+        return ("group", 1, [("text", "{")] + seplist(list(value.items()), pair) + [("text", "}")])
+    if isinstance(value, (list, tuple)):
+        return ("group", 1, [("text", "[")] + seplist(list(value), lambda v: [_pp_doc(v)]) + [("text", "]")])
+    if isinstance(value, Sym):
+        return ("text", ":" + value)
+    return ("text", ruby_inspect(value))
+
+
+def _pp_fits(width, items):
+    stack = list(reversed(items))
+    while width >= 0:
+        if not stack:
+            return True
+        indent, mode, doc = stack.pop()
+        if doc[0] == "text":
+            width -= len(doc[1])
+        elif doc[0] == "break":
+            if mode == "break":
+                return True
+            width -= 1
+        else:
+            stack.extend((indent + doc[1], mode, child) for child in reversed(doc[2]))
+    return False
+
+
+def ruby_pp(value, width=79):
+    """A value laid out as Ruby's ``pretty_inspect`` prints it: a group breaks when it does not fit in 79 columns."""
+    out, col = [], 0
+    stack = [(0, "break", _pp_doc(value))]
+    while stack:
+        indent, mode, doc = stack.pop()
+        if doc[0] == "text":
+            out.append(doc[1])
+            col += len(doc[1])
+        elif doc[0] == "break":
+            if mode == "flat":
+                out.append(" ")
+                col += 1
+            else:
+                out.append("\n" + " " * indent)
+                col = indent
+        else:
+            flat = mode == "flat" or _pp_fits(width - col, [(indent, "flat", doc)] + list(reversed(stack)))
+            stack.extend((indent + doc[1], "flat" if flat else "break", child) for child in reversed(doc[2]))
+    return "".join(out)

@@ -15,6 +15,7 @@ def sg():
     Shotgun.set_schema_paths(*schemas.paths())
     sg = Shotgun("https://mock.example.com", script_name="probe-script", api_key="y")
     sg.set_clock(lambda: T0)
+    sg.require_project = False  # the create contract is tested in test_records.py
     return sg
 
 
@@ -35,8 +36,9 @@ def test_create_logs_new_then_one_change_per_field(sg):
     new = rows[0]
     assert new["meta"] == {"type": "new_entity", "entity_type": "Version", "entity_id": v["id"], "platform_id": None}
     assert new["description"] == "probe-script created new Version "
-    assert new["entity"] == {"type": "Version", "id": v["id"]}
-    assert new["project"] == {"type": "Project", "id": project["id"]}
+    # A returned link has the target's name (finding 025, finding 060).
+    assert new["entity"] == {"type": "Version", "id": v["id"], "name": "v001"}
+    assert new["project"] == {"type": "Project", "id": project["id"], "name": "Demo"}
     assert new["user"]["type"] == "ApiUser" and new["user"]["name"] == "probe-script"
     code = [r for r in rows if r["attribute_name"] == "code"][0]
     assert code["meta"] == {

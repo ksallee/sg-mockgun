@@ -22,11 +22,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from shotgun_api3 import ShotgunError
 
-from . import wire
+from . import attention, wire
 from .mockgun import FieldReviveError, Shotgun
 from . import schemas
 
-SERVER_VERSION = [8, 91, 0]  # the site the bundled schema and the recorded answers come from
 
 
 class Site:
@@ -112,8 +111,31 @@ class Site:
                 return e.status, rest_error(e.status, str(e))
         return 204, None
 
+    # summarize, text_search, info (api3 040 to 046)
+
     def m_info(self, params):
-        return {"version": SERVER_VERSION, "s3_uploads_enabled": False, "totango_site_id": None}
+        # api3 046: answered without credentials. Site.call checks none.
+        return self.mock.info()
+
+    def m_summarize(self, params):
+        entity_type = params["type"]
+        filters = params.get("filters")
+        operator = None
+        if isinstance(filters, dict) and "logical_operator" in filters:
+            filters, operator = wire.filters_from_wire(filters)
+            filters = self._typed_filters(filters, self.mock._schema.get(entity_type, {}))
+        return self.mock.summarize(entity_type, filters, params.get("summaries"), filter_operator=operator,
+                                   grouping=params.get("grouping"),
+                                   include_archived_projects=params.get("include_archived_projects", True))
+
+    def m_query_display_name_cache(self, params):
+        entity_types = {}
+        for entity_type, node in (params.get("entity_types") or {}).items():
+            filters, operator = wire.filters_from_wire(node)
+            filters = self._typed_filters(filters, self.mock._schema.get(entity_type, {}))
+            entity_types[entity_type] = [{"filter_operator": operator, "filters": filters}] if operator == "any" else filters
+        return self.mock.text_search(params.get("text"), entity_types, project_ids=params.get("project_ids"),
+                                     limit=params.get("max_results"))
 
     def m_read(self, params):
         filters, operator = wire.filters_from_wire(params.get("filters") or {"conditions": []})
@@ -148,7 +170,7 @@ class Site:
 
     def m_update(self, params):
         data, modes = wire.fields_from_wire(params.get("fields"))
-        return self.mock.update(params["type"], params["id"], self._data(params["type"], data), modes or None)[0]
+        return self.mock.update(params["type"], params["id"], self._data(params["type"], data), modes or None)
 
     def m_delete(self, params):
         return self.mock.delete(params["type"], params["id"])
@@ -157,18 +179,19 @@ class Site:
         return self.mock.revive(params["type"], params["id"])
 
     def m_batch(self, params):
-        results = []
+        requests = []
         for request in params:
             kind = request["request_type"]
-            if kind == "create":
-                results.append(self.m_create(request))
-            elif kind == "update":
-                results.append(self.m_update(request))
-            elif kind == "delete":
-                results.append(self.m_delete(request))
-            else:
-                raise ShotgunError("Invalid request type %s in request %s" % (kind, request))
-        return results
+            out = {"request_type": kind, "entity_type": request["type"]}
+            if kind in ("create", "update"):
+                data, modes = wire.fields_from_wire(request.get("fields"))
+                out["data"] = self._data(request["type"], data)
+                if modes:
+                    out["multi_entity_update_modes"] = modes
+            if kind in ("update", "delete"):
+                out["entity_id"] = request["id"]
+            requests.append(out)
+        return self.mock.batch(requests)  # atomic, api3 063
 
     def m_schema_read(self, params):
         return self.mock.schema_read()
@@ -191,6 +214,40 @@ class Site:
     def m_schema_field_delete(self, params):
         return self.mock.schema_field_delete(params["type"], params["field_name"])
 
+
+    # attention, navigation and site reads (sg_mockgun.attention, api3 047 to 052)
+    def m_note_thread_contents(self, params):
+        return attention.note_thread_contents(self.mock, params.get("note_id"), params.get("entity_fields") or {})
+
+    def m_activity_stream(self, params):
+        return attention.activity_stream(
+            self.mock, params.get("type"), params.get("id"), params.get("entity_fields") or {},
+            params.get("min_id"), params.get("max_id"), params.get("limit"))
+
+    def m_followers(self, params):
+        return attention.followers(self.mock, params.get("entity"))
+
+    def m_following(self, params):
+        return attention.following(self.mock, params)
+
+    def m_nav_expand(self, params):
+        return attention.nav_expand(self.mock, params.get("path"), params.get("seed_entity_field"),
+                                    params.get("entity_fields"))
+
+    def m_nav_search(self, params):
+        return attention.nav_search(self.mock, params.get("root_path"), params.get("search_criteria") or {})
+
+    def m_preferences_read(self, params):
+        return attention.preferences_read(self.mock, params.get("prefs", []))
+
+    def m_work_schedule_read(self, params):
+        return attention.work_schedule_read(self.mock, params)
+
+    def m_user_subscriptions_read(self, params):
+        return self.mock.user_subscriptions_read()
+
+    def m_export_page(self, params):
+        return attention.export_page(self.mock, params)
 
 def rest_error(status, title):
     # Status and title are recorded; the site's numeric "code" for these is not, so it is left out.
@@ -244,17 +301,29 @@ def make_server(mock, host="127.0.0.1", port=8080):
     return server
 
 
-def main(argv=None):
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(prog="sg-mockgun")
     sub = parser.add_subparsers(dest="command", required=True)
     serve = sub.add_parser("serve", help="serve a mock site over the api3 JSON protocol")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8080)
     serve.add_argument("--schema", default="fpt_8_91", help="a bundled schema name")
-    args = parser.parse_args(argv)
-    Shotgun.set_schema_paths(*schemas.paths(args.schema))
+    serve.add_argument("--seed", help="a JSON seed file of records to load, see sg_mockgun.seed")
+    return parser.parse_args(argv)
+
+
+def build_mock(schema, seed=None):
+    """A mockgun instance on a bundled schema, loaded with the records in ``seed`` when given."""
+    Shotgun.set_schema_paths(*schemas.paths(schema))
     mock = Shotgun("https://mock.example.com", script_name="mockgun", api_key="mockgun")
-    server = make_server(mock, args.host, args.port)
+    if seed:
+        mock.load(seed)
+    return mock
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    server = make_server(build_mock(args.schema, args.seed), args.host, args.port)
     print("serving api3 on http://%s:%d" % server.server_address[:2], flush=True)
     server.serve_forever()
 

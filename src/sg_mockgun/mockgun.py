@@ -116,14 +116,56 @@ Below is a non-exhaustive list of things that we still need to implement:
 
 import copy
 import datetime
+import importlib.metadata
+import os
+import urllib.error
+import urllib.parse
+import urllib.request
 from typing import Any
 
-from shotgun_api3 import Fault, ShotgunError
+from shotgun_api3 import Fault, ShotgunError, ShotgunFileDownloadError, ShotgunThumbnailNotReady
 from shotgun_api3.shotgun import _Config
+from shotgun_api3 import Fault, ShotgunError
+from shotgun_api3.shotgun import ServerCapabilities, _Config, _translate_filters
 from .errors import MockgunError
+from .display import display_name
 from .schema import SchemaFactory
+from . import attention as _attention
 from . import events as _events
+from . import media as _media
+from . import seed as _seed
+from . import scheduling as _scheduling
+from . import taskflow as _taskflow
+from . import writes as _writes
+from . import reads as _reads
+from . import records as _records
+from . import summarize as _summarize
+from . import text_search as _text_search
+from .site_info import DEFAULT_INFO
+from . import wire as _wire
+import shotgun_api3.shotgun as _api3
+from .filters import (
+    CALENDAR, IGNORED, RELATIONS, RELATIVE, calculated_type, client_index_error, filter_refusal, filter_values,
+    jsonb_contains, relative_match, unknown_field,
+)
 from .fields import CREATABLE_TYPES, UPDATABLE_PROPERTIES, field_code, new_field, ruby_inspect, ruby_list, ruby_params
+
+_ALL_RELATIONS = set(r for relations in RELATIONS.values() for r in relations)
+
+def _utc_now():
+    """The current time in UTC."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _same_link(a, b):
+    """Whether two entity links name the same row."""
+    return a["type"] == b["type"] and a["id"] == b["id"]
+
+
+def _link_name(link):
+    """The display name of an entity link, empty when the linked row has none."""
+    return link.get("name") or ""
+
 
 class FieldReviveError(ShotgunError):
     """A refused field revive. ``status`` is the HTTP status the REST route answers with."""
@@ -140,7 +182,11 @@ _RETIRED_FIELD = (
 
 # ----------------------------------------------------------------------------
 # Version
-__version__ = "0.0.1"
+try:
+    __version__ = importlib.metadata.version("sg-mockgun")
+except importlib.metadata.PackageNotFoundError:
+    # Imported from a source tree that was never installed.
+    __version__ = "0.0.0"
 
 
 # ----------------------------------------------------------------------------
@@ -231,10 +277,21 @@ class Shotgun(object):
         # The event log. Like an ApiUser's generate_event_log_entries (sg-groundtruth finding 049), but
         # on by default so a test sees its writes logged unless it says otherwise.
         self.generate_event_log_entries = True
-        self._clock = lambda: datetime.datetime.now(datetime.timezone.utc)
+        self._clock = _utc_now
         self._event_user = {"type": "ApiUser", "id": 1, "name": script_name or login or "mockgun"}
         self._column_ids = {}
         self._retired_at = {}
+        self._media_state = _media.new_state()
+        # The studio work week, Monday first (finding 047). Scheduling counts working days on it.
+        self.work_week = _scheduling.DEFAULT_WORK_WEEK
+        # The highest id handed out per type, including ids of refused or rolled-back creates (api3 060, 063).
+        self._spent_ids = {}
+        # What a delete changed on other rows, keyed by the deleted row, for revive to put back (api3 027, 065).
+        self._delete_effects = {}
+        # Per-project schema values: {(project id, entity type, field): {"visible": bool, "hidden_values": list}}.
+        self._project_schema = {}
+        # A site refuses a project-scoped create without `project` (api3 060). False lets a test skip it.
+        self.require_project = True
 
         # set some basic public members that exist in the Shotgun API
         self.base_url = base_url
@@ -247,9 +304,14 @@ class Shotgun(object):
         self.create("EventLogEntry", data)
 
         self.finds = 0
+        self._info = copy.deepcopy(DEFAULT_INFO)
 
     ###################################################################################################
     # public API methods
+
+    def set_work_week(self, days):
+        """Set the studio work week: seven booleans, Monday first, True for a working day."""
+        self.work_week = tuple(bool(d) for d in days)
 
     def set_clock(self, clock):
         """Make event timestamps deterministic: ``clock`` returns a timezone-aware datetime."""
@@ -378,19 +440,69 @@ class Shotgun(object):
 
     def schema_field_read(self, entity_type, field_name=None, project_entity=None):
         self._validate_entity_type(entity_type)
-        if field_name is None:
-            return self._schema[entity_type]
-        if field_name not in self._schema[entity_type]:
+        if field_name is not None and field_name not in self._schema[entity_type]:
             raise Fault(
                 "API schema_field_read() %s.%s doesn't exist:\n%s"
                 % (entity_type, field_name, ruby_params({"type": entity_type, "field_name": field_name}))
             )
-        return {field_name: self._schema[entity_type][field_name]}
+        names = list(self._schema[entity_type]) if field_name is None else [field_name]
+        project_id = project_entity.get("id") if isinstance(project_entity, dict) else None
+        # api3 064: with a project, `visible` and status `hidden_values` read that project's values.
+        overlays = dict(
+            (name, self._project_schema[(project_id, entity_type, name)]) for name in names
+            if (project_id, entity_type, name) in self._project_schema
+        )
+        if not overlays:
+            if field_name is None:
+                return self._schema[entity_type]
+            return {field_name: self._schema[entity_type][field_name]}
+        out = {}
+        for name in names:
+            field = self._schema[entity_type][name]
+            if name in overlays:
+                field = copy.deepcopy(field)
+                if "visible" in overlays[name]:
+                    field["visible"]["value"] = overlays[name]["visible"]
+                if "hidden_values" in overlays[name]:
+                    field["properties"]["hidden_values"] = {"value": list(overlays[name]["hidden_values"]),
+                                                            "editable": False}
+            out[name] = field
+        return out
+
+    def set_project_schema(self, project, entity_type, field_name, visible=None, hidden_values=None):
+        """Set what ``schema_field_read(project_entity=project)`` reads for one field's ``visible`` and ``hidden_values``."""
+        self._validate_entity_fields(entity_type, [field_name])
+        overlay = self._project_schema.setdefault((project["id"], entity_type, field_name), {})
+        if visible is not None:
+            overlay["visible"] = visible
+        if hidden_values is not None:
+            overlay["hidden_values"] = list(hidden_values)
 
     def find(
         self, entity_type, filters, fields=None, order=None, filter_operator=None,
-        limit=0, retired_only=False, page=0
+        limit=0, retired_only=False, page=0, include_archived_projects=True,
+        additional_filter_presets=None,
     ):
+        # Argument checks and the limit and page arithmetic follow shotgun_api3.Shotgun.find.
+        if not isinstance(limit, int) or limit < 0:
+            raise ValueError("limit parameter must be a positive integer")
+        if not isinstance(page, int) or page < 0:
+            raise ValueError("page parameter must be a positive integer")
+        # api3 024: the client copies `column` into `field_name` and fills `direction` with "asc".
+        sorts = []
+        for sort in order or []:
+            sort = dict(sort)
+            if "column" in sort:
+                sort["field_name"] = sort["column"]
+            sort.setdefault("direction", "asc")
+            sorts.append({"field_name": sort["field_name"], "direction": sort["direction"]})
+
+        # api3 020: the page size comes from server_info, and limit shrinks it.
+        server_info = getattr(self, "server_info", None)
+        page_size = _reads.page_size(server_info if isinstance(server_info, dict) else None)
+        if limit and limit <= page_size:
+            page_size = limit
+            page = page or 1
 
         self.finds += 1
 
@@ -423,6 +535,21 @@ class Shotgun(object):
             # traditiona style sg filters
             resolved_filters = filters
 
+        # api3 013: validated before the scan.
+        self._validate_filters(entity_type, resolved_filters)
+
+        for sort in sorts:
+            if sort["direction"] not in ("asc", "desc"):
+                # api3 024
+                raise Fault("API read() invalid/missing string 'direction':\n%s" % ruby_inspect(sort))
+
+        if additional_filter_presets:
+            params = _reads.read_params(
+                entity_type, filters, filter_operator, list(fields) if fields else None, retired_only,
+                page_size, page or 1, page == 0, additional_filter_presets, include_archived_projects,
+            )
+            latest_by = self._check_presets(entity_type, additional_filter_presets, params)
+
         results = [
             # Apply the filters for every single entities for the given entity type.
             row for row in self._db[entity_type].values()
@@ -431,45 +558,37 @@ class Shotgun(object):
             )
         ]
 
-        # handle the ordering of the recordset
-        if order:
-            # order: [{"field_name": "code", "direction": "asc"}, ... ]
-            def sort_none(k, order_field):
-                """
-                Handle sorting of None consistently.
-                Note: Doesn't handle [checkbox, serializable, url].
-                """
-                field_type = self._get_field_type(k["type"], order_field)
-                value = k[order_field]
-                if value is not None:
-                    return value
-                elif field_type in ("number", "percent", "duration"):
-                    return 0
-                elif field_type == "float":
-                    return 0.0
-                elif field_type in ("text", "entity_type", "date", "list", "status_list"):
-                    return ""
-                elif field_type == "date_time":
-                    return datetime.datetime(datetime.MINYEAR, 1, 1)
-                return None
+        if not include_archived_projects:
+            # api3 022: rows in an archived project, and archived Project rows, drop out.
+            results = [
+                row for row in results
+                if not self._in_archived_project(row) and not (entity_type == "Project" and row.get("archived"))
+            ]
 
-            for order_entry in order:
-                if "field_name" not in order_entry:
-                    raise ValueError("Order clauses must be list of dicts with keys 'field_name' and 'direction'!")
+        if additional_filter_presets:
+            keep = self._latest_ids(entity_type, latest_by, retired_only)
+            results = [row for row in results if row["id"] in keep]
 
-                order_field = order_entry["field_name"]
-                if order_entry["direction"] == "asc":
-                    desc_order = False
-                elif order_entry["direction"] == "desc":
-                    desc_order = True
-                else:
-                    raise ValueError("Unknown ordering direction")
+        # finding 026: id ascending is the default order and the last tiebreak.
+        results = sorted(results, key=lambda row: row["id"])
 
-                results = sorted(
-                    results,
-                    key=lambda k: sort_none(k, order_field),
-                    reverse=desc_order,
-                )
+        keys = []
+        for sort in sorts:
+            # finding 026, api3 024: a summary, url or unknown field is ignored.
+            try:
+                field_type = self._get_field_type(entity_type, sort["field_name"])
+            except (KeyError, ShotgunError):
+                continue
+            if field_type in ("summary", "url"):
+                continue
+            keys.append((sort["field_name"], sort["direction"] == "desc"))
+        if keys:
+            results = _reads.sort_rows(results, keys, lambda row, f: self._sort_value(entity_type, row, f))
+
+        if page:
+            results = results[(page - 1) * page_size:page * page_size]
+        elif limit:
+            results = results[:limit]
 
         if fields is None:
             fields = set(["type", "id"])
@@ -477,37 +596,118 @@ class Shotgun(object):
             fields = set(fields) | set(["type", "id"])
 
         # get the values requested
-        val = [dict((field, self._get_field_from_row(entity_type, row, field)) for field in fields) for row in results]
+        val = [dict((field, self._read_field(entity_type, row, field)) for field in fields) for row in results]
 
         return val
 
     def find_one(
         self, entity_type, filters, fields=None, order=None, filter_operator=None,
-        retired_only=False
+        retired_only=False, include_archived_projects=True, additional_filter_presets=None,
     ):
+        # Upstream mockgun passes these four keywords. Callers that patch find assert them.
+        options = {}
+        if include_archived_projects is not True:
+            options["include_archived_projects"] = include_archived_projects
+        if additional_filter_presets is not None:
+            options["additional_filter_presets"] = additional_filter_presets
         results = self.find(
             entity_type, filters, fields=fields,
-            order=order, filter_operator=filter_operator, retired_only=retired_only
+            order=order, filter_operator=filter_operator, retired_only=retired_only, **options
         )
         return results[0] if results else None
 
+    def _check_presets(self, entity_type, presets, params):
+        """Raise the site's Fault for a preset it refuses; return the LATEST latest_by value (api3 023)."""
+        latest_by = None
+        for preset in presets:
+            if not isinstance(preset, dict):
+                raise Fault("API read() invalid additional filter preset format. It must be a hash:\n%s"
+                            % _reads.pp(params))
+            if preset.get("preset_name") != "LATEST" or entity_type not in _reads.LATEST_BY:
+                raise Fault("API read() Invalid additional filter preset provided: \n%s" % _reads.pp(params))
+            if preset.get("latest_by") not in _reads.LATEST_BY[entity_type]:
+                raise Fault("API read() CRUD ERROR #10: Read failed for entity type [%s]" % entity_type)
+            latest_by = preset["latest_by"]
+        return latest_by
+
+    def _latest_ids(self, entity_type, latest_by, retired_only):
+        """Ids LATEST keeps among the rows of one retirement state (api3 023)."""
+        def link_key(value):
+            return (value["type"], value["id"]) if isinstance(value, dict) else value
+
+        if entity_type == "PublishedFile":
+            def group(row):
+                return tuple(link_key(row.get(f)) for f in _reads.PUBLISHED_FILE_GROUP)
+        else:
+            def group(row):
+                return (link_key(row.get("entity")),)
+
+        def rank(row):
+            if latest_by != "BY_PIPELINE_STEP_NUMBER_AND_ENTITIES_CREATED_AT":
+                return ()
+            task = self._db["Task"].get((row.get("sg_task") or {}).get("id"), {})
+            step = self._db["Step"].get((task.get("step") or {}).get("id"), {})
+            order = step.get("list_order")
+            return (-1 if order is None else order,)
+
+        rows = [row for row in self._db[entity_type].values() if row["__retired"] == bool(retired_only)]
+        return _reads.latest_ids(rows, group, rank)
+
+    def _client_datetimes(self, entity_type, data):
+        """Return data with each date_time value made aware as the client sends it."""
+        convert = self.config.convert_datetimes_to_utc
+        return dict(
+            (field, _wire.client_datetime(value, convert) if self._field_type_or_none(entity_type, field) == "date_time"
+             else value)
+            for field, value in data.items()
+        )
+
+    def _sort_value(self, entity_type, row, field):
+        """The value a sort compares for one field of a row (api3 024, api3 025)."""
+        value = self._get_field_from_row(entity_type, row, field)
+        if value is None:
+            return None
+        field_type = self._get_field_type(entity_type, field)
+        if field_type == "status_list" and "." not in field:
+            valid = self._schema[entity_type][field]["properties"].get("valid_values", {}).get("value") or []
+            return valid.index(value) if value in valid else len(valid)
+        if field_type == "entity" and isinstance(value, dict):
+            link = self._live_link(value)
+            return link["name"] if link else None
+        if field_type == "multi_entity" and isinstance(value, list):
+            # multi_entity sort order unprobed (sg-mockgun#39)
+            return tuple(link["name"] or "" for link in map(self._live_link, value) if link) or None
+        if field_type == "date_time":
+            return _wire.client_datetime(value, self.config.convert_datetimes_to_utc)
+        return value
+
+    def _in_archived_project(self, row):
+        """Return True when the row's project links a Project whose archived is True."""
+        project = row.get("project")
+        if not isinstance(project, dict) or project.get("type") != "Project":
+            return False
+        linked = self._db.get("Project", {}).get(project.get("id"))
+        return bool(linked and linked.get("archived") is True)
+
     def batch(self, requests):
-        results = []
         for request in requests:
-            if request["request_type"] == "create":
-                results.append(self.create(request["entity_type"], request["data"]))
-            elif request["request_type"] == "update":
-                # note: Shotgun.update returns a list of a single item
-                results.append(
-                    self.update(request["entity_type"],
-                                request["entity_id"],
-                                request["data"],
-                                request.get("multi_entity_update_modes"))[0]
-                )
-            elif request["request_type"] == "delete":
-                results.append(self.delete(request["entity_type"], request["entity_id"]))
-            else:
+            if request["request_type"] not in ("create", "update", "delete"):
                 raise ShotgunError("Invalid request type %s in request %s" % (request["request_type"], request))
+        # api3 063: one failing request rolls back every other one. Ids already handed out stay spent.
+        saved = copy.deepcopy((self._db, self._retired_at, self._delete_effects))
+        results = []
+        for index, request in enumerate(requests):
+            try:
+                if request["request_type"] == "create":
+                    results.append(self.create(request["entity_type"], request["data"]))
+                elif request["request_type"] == "update":
+                    results.append(self.update(request["entity_type"], request["entity_id"], request["data"],
+                                               request.get("multi_entity_update_modes")))
+                else:
+                    results.append(self.delete(request["entity_type"], request["entity_id"]))
+            except ShotgunError as e:
+                self._db, self._retired_at, self._delete_effects = saved
+                raise Fault(_records.rolled_back(index, str(e)))
         return results
 
     def create(self, entity_type, data, return_fields=None):
@@ -530,18 +730,27 @@ class Shotgun(object):
                     data[d]["local_path_mac"] = data[d]["local_path"]
 
         self._validate_entity_type(entity_type)
-        self._validate_entity_data(entity_type, data)
+        self._check_create_contract(entity_type, data, return_fields)
+        data = dict(data)
+        upload_image = data.pop("image", None)  # api3 035: the client never sends image on create
+        data = self._validate_entity_data(entity_type, data, "create")
+        data = self._client_datetimes(entity_type, data)
+        data = self._check_status(entity_type, data, "create")
         self._validate_entity_fields(entity_type, return_fields)
-        try:
-            # get next id in this table
-            next_id = max(self._db[entity_type]) + 1
-        except ValueError:
-            next_id = 1
+        next_id = self._next_id(entity_type)
 
         row = self._get_new_row(entity_type)
 
         self._update_row(entity_type, row, data)
         row["id"] = next_id
+        now = self._clock()
+        server_set = _writes.new_row_values(
+            entity_type, self._schema[entity_type], self._event_user, now, display_name(entity_type, row))
+        row.update((field, value) for field, value in server_set.items() if field not in data)
+        identity = _records.IDENTITY_FIELDS.get(entity_type)
+        if identity and identity not in data:
+            # finding 012, api3 060
+            row[identity] = "New %s %d" % (self._schema_entity[entity_type]["name"]["value"], next_id)
 
         self._db[entity_type][next_id] = row
 
@@ -553,23 +762,32 @@ class Shotgun(object):
             ]
             self._log(
                 _events.entity_created(self._event_user["name"], entity_type, next_id, self._row_name(row), changes),
-                row,
+                row, now=now,
             )
+        _taskflow.after_create(self, entity_type, row, data)
 
-        if return_fields is None:
-            result = dict((field, self._get_field_from_row(entity_type, row, field)) for field in data)
-        else:
-            result = dict((field, self._get_field_from_row(entity_type, row, field)) for field in return_fields)
+        # api3 038: the fields sent, plus the return_fields asked for.
+        result = dict((field, self._read_field(entity_type, row, field)) for field in data)
+        result.update((field, self._read_field(entity_type, row, field)) for field in return_fields or [])
 
         result["type"] = row["type"]
         result["id"] = row["id"]
 
+        if upload_image:
+            self._client_upload_image(entity_type, row["id"], upload_image, result)
         return result
 
     def update(self, entity_type, entity_id, data, multi_entity_update_modes=None):
         self._validate_entity_type(entity_type)
-        self._validate_entity_data(entity_type, data)
-        self._validate_entity_exists(entity_type, entity_id)
+        data = dict(data)
+        upload_image = data.pop("image") if data.get("image") is not None else None  # api3 035
+        dotted = dict((field, data.pop(field)) for field in list(data) if "." in field)
+        self._validate_entity_fields(entity_type, dotted.keys())
+        data = self._validate_entity_data(entity_type, data)
+        data = self._client_datetimes(entity_type, data)
+        data = self._check_status(entity_type, data, "update")
+        self._validate_entity_exists(entity_type, entity_id, "update")
+        _taskflow.before_update(self, entity_type, data)
 
         row = self._db[entity_type][entity_id]
         before = dict((field, copy.deepcopy(row.get(field))) for field in data)
@@ -583,12 +801,21 @@ class Shotgun(object):
                         self._display_name(entity_type, field), self._get_field_type(entity_type, field),
                         before[field], row.get(field))]
             self._log(rows, row)
+        _taskflow.after_update(self, entity_type, row, data, before)
 
-        return [dict((field, item) for field, item in row.items() if field in data or field in ("type", "id"))]
+        self._write_through(row, dotted)
+
+        result = dict((field, self._read_field(entity_type, row, field)) for field in data)
+        result["type"] = row["type"]
+        result["id"] = row["id"]
+        result.update(dotted)
+        if upload_image:
+            self._client_upload_image(entity_type, entity_id, upload_image, result)
+        return result
 
     def delete(self, entity_type, entity_id):
         self._validate_entity_type(entity_type)
-        self._validate_entity_exists(entity_type, entity_id)
+        self._validate_entity_exists(entity_type, entity_id, "delete")
 
         row = self._db[entity_type][entity_id]
         if not row["__retired"]:
@@ -604,6 +831,9 @@ class Shotgun(object):
                     _events.entity_retired(self._event_user["name"], entity_type, entity_id, self._row_name(row), when),
                     row, linked=False,
                 )
+            _taskflow.after_delete(self, entity_type, row)
+            if entity_type != "EventLogEntry":
+                self._apply_delete_effects(entity_type, entity_id)
             return True
         else:
             return False
@@ -621,15 +851,213 @@ class Shotgun(object):
                     _events.entity_revived(self._event_user["name"], entity_type, entity_id, self._row_name(row), when),
                     row,
                 )
+                self._undo_delete_effects(entity_type, entity_id)
+            _taskflow.after_revive(self, entity_type, row)
             return True
         else:
             return False
 
-    def upload(self, entity_type, entity_id, path, field_name=None, display_name=None, tag_list=None):
-        raise NotImplementedError
+    def _write_through(self, row, dotted):
+        """Write each `link.Type.field` value to the row the link points at (api3 039)."""
+        for path, value in dotted.items():
+            link_field, target_type, target_field = path.split(".", 2)
+            link = row.get(link_field)
+            # A link that is empty or of another type: api3 unprobed (sg-mockgun#39); nothing is written.
+            if isinstance(link, dict) and link.get("type") == target_type:
+                self.update(target_type, link["id"], {target_field: value})
+
+    def _client_upload_image(self, entity_type, entity_id, path, result):
+        """Upload an image the way the client does after its create or update (api3 035)."""
+        path = os.path.abspath(os.path.expanduser(path or ""))
+        if not os.path.isfile(path):
+            raise ShotgunError("Path must be a valid file, got '%s'" % path)
+        self.upload_thumbnail(entity_type, entity_id, path)
+        result["image"] = self.find_one(entity_type, [["id", "is", entity_id]], ["image"])["image"]
+
+    ###################################################################################################
+    # media: upload, thumbnails, download (sg_mockgun.media, api3 053 to 058)
+
+    def upload(self, entity_type, entity_id, path, field_name=None, display_name=None, tag_list=None,
+               created_at=None):
+        """Store the file's bytes on a new Attachment linked to the entity and return its id (api3 053)."""
+        path = self._upload_path(path, created_at)
+        if field_name in _media.THUMBNAIL_FIELDS:
+            return self._upload_thumbnail(entity_type, entity_id, path, _media.THUMBNAIL_FIELDS[field_name])
+        self._check_upload_target(entity_type, entity_id, path)
+        if field_name is not None and self._schema[entity_type].get(field_name, {}).get(
+                "data_type", {}).get("value") != "url":
+            raise ShotgunError(_media.upload_refusal(path, self.config, _media.invalid_column(entity_type, field_name)))
+        with open(path, "rb") as f:
+            content = f.read()
+        filename = os.path.basename(path)
+        name = display_name or filename
+        entity = self._db[entity_type][entity_id]
+        data = {
+            "attachment_links": [{"type": entity_type, "id": entity_id}],
+            "original_fname": filename,
+            "display_name": name,
+            "tags": [self._tag_link(tag) for tag in _media.tag_names(tag_list)],
+        }
+        if isinstance(entity.get("project"), dict):
+            data["project"] = {"type": "Project", "id": entity["project"]["id"]}
+        if created_at is not None:
+            data["created_at"] = created_at
+        attachment_id = self.create("Attachment", data)["id"]
+        row = self._db["Attachment"][attachment_id]
+        url = _media.storage_url(("Attachment", attachment_id), filename)
+        row["filename"] = filename
+        row["cached_display_name"] = name
+        row["this_file"] = _media.this_file(url, name, filename, attachment_id)
+        self._media_state["files"][attachment_id] = content
+        self._media_state["urls"][url] = attachment_id
+        if field_name is not None:
+            entity[field_name] = copy.deepcopy(row["this_file"])
+            if _media.makes_thumbnail(filename):
+                # api3 053: a media upload makes a thumbnail, for the Attachment and the entity.
+                final = _media.storage_url(("Attachment", attachment_id, "image"), _media.thumbnail_name(filename))
+                row["image_source_entity"] = {"type": "Attachment", "id": attachment_id}
+                row["processing_status"] = _media.PENDING_STATUS
+                self._set_pending("Attachment", attachment_id, "image", final)
+                if "image" in self._schema[entity_type]:
+                    self._set_pending(entity_type, entity_id, "image", final)
+        return attachment_id
 
     def upload_thumbnail(self, entity_type, entity_id, path, **kwargs):
-        pass
+        """Set the entity's image, transient until ``finalize_thumbnails``; return a thumbnail id (api3 055)."""
+        return self.upload(entity_type, entity_id, path, field_name="thumb_image", **kwargs)
+
+    def upload_filmstrip_thumbnail(self, entity_type, entity_id, path, **kwargs):
+        """Set the entity's filmstrip_image at once; return a thumbnail id (api3 055)."""
+        return self.upload(entity_type, entity_id, path, field_name="filmstrip_thumb_image", **kwargs)
+
+    def finalize_thumbnails(self):
+        """Mock only: end every pending transcode, so each transient image reads its final URL."""
+        for (entity_type, entity_id, field), final in self._media_state["pending"].items():
+            row = self._db.get(entity_type, {}).get(entity_id)
+            if row is not None and row.get(field) == _media.transient_url(self.config):
+                row[field] = final
+        self._media_state["pending"] = {}
+
+    def share_thumbnail(self, entities, thumbnail_path=None, source_entity=None, filmstrip_thumbnail=False,
+                        **kwargs):
+        """Point the entities' image at the source's thumbnail and return its id (api3 058)."""
+        # The client's own checks, word for word.
+        if not isinstance(entities, list) or len(entities) == 0:
+            raise ShotgunError("'entities' parameter must be a list of entity hashes and may not be empty")
+        for e in entities:
+            if not isinstance(e, dict) or "id" not in e or "type" not in e:
+                raise ShotgunError("'entities' parameter must be a list of entity hashes with at least "
+                                   "'type' and 'id' keys.\nInvalid entity: %s" % e)
+        if (not thumbnail_path and not source_entity) or (thumbnail_path and source_entity):
+            raise ShotgunError("You must supply either thumbnail_path OR source_entity.")
+        if thumbnail_path:
+            source_entity = entities.pop(0)
+            upload = self.upload_filmstrip_thumbnail if filmstrip_thumbnail else self.upload_thumbnail
+            thumb_id = upload(source_entity["type"], source_entity["id"], thumbnail_path, **kwargs)
+            if len(entities) == 0:
+                return thumb_id
+        elif not isinstance(source_entity, dict) or "id" not in source_entity or "type" not in source_entity:
+            raise ShotgunError("'source_entity' parameter must be a dict with at least 'type' and 'id' keys."
+                               "\nGot: %s (%s)" % (source_entity, type(source_entity)))
+        field = "filmstrip_image" if filmstrip_thumbnail else "image"
+        for e in entities:
+            if e["id"] not in self._db.get(e["type"], {}):
+                raise ShotgunError(_media.share_missing(e["type"], e["id"]))
+        source = self._db[source_entity["type"]][source_entity["id"]]
+        image = source.get(field)
+        if image == _media.transient_url(self.config):
+            raise ShotgunThumbnailNotReady(_media.NOT_READY)
+        for e in entities:
+            self._db[e["type"]][e["id"]][field] = image
+        if image is None:
+            return None
+        return self._media_state["thumbnail_ids"].get((source_entity["type"], source_entity["id"]))
+
+    def get_attachment_download_url(self, attachment):
+        """The URL download_attachment fetches; client-side, no request (api3 057)."""
+        return _media.attachment_download_url(self.config, attachment)
+
+    def download_attachment(self, attachment=False, file_path=None, attachment_id=None):
+        """Return an uploaded file's bytes, or write them to ``file_path`` and return it (api3 056)."""
+        if attachment is False:
+            if type(attachment_id) == int:
+                attachment = attachment_id
+            else:
+                raise TypeError("Missing parameter 'attachment'. Expected a dict, int, NoneType value or"
+                                "an int for parameter attachment_id")
+        fp = open(file_path, "wb") if file_path else None
+        try:
+            url = self.get_attachment_download_url(attachment)
+            if url is None:
+                return None
+            content = self._stored_bytes(url)
+            if fp is None:
+                return content
+            fp.write(content)
+            return file_path
+        finally:
+            if fp is not None:
+                fp.close()
+
+    def _upload_path(self, path, created_at):
+        """The client's checks on the local file, before any request."""
+        path = os.path.abspath(os.path.expanduser(path or ""))
+        if not os.path.isfile(path):
+            raise ShotgunError("Path must be a valid file, got '%s'" % path)
+        if os.path.getsize(path) == 0:
+            raise ShotgunError("Path cannot be an empty file: '%s'" % path)
+        if created_at is not None and not isinstance(created_at, datetime.datetime):
+            raise ShotgunError("created_at must be a datetime.datetime instance, got '%s'" % type(created_at))
+        return path
+
+    def _check_upload_target(self, entity_type, entity_id, path):
+        if entity_type not in self._schema:
+            raise ShotgunError(_media.upload_refusal(path, self.config, _media.invalid_class(entity_type)))
+        row = self._db[entity_type].get(entity_id)
+        if row is None or row["__retired"]:
+            raise ShotgunError(_media.upload_refusal(path, self.config, _media.entity_not_found(entity_type, entity_id)))
+
+    def _upload_thumbnail(self, entity_type, entity_id, path, field):
+        """api3 055: no Attachment; the id comes from a sequence of its own."""
+        self._check_upload_target(entity_type, entity_id, path)
+        thumb_id = self._media_state["next_thumbnail_id"]
+        self._media_state["next_thumbnail_id"] += 1
+        filename = os.path.basename(path)
+        if field in self._schema[entity_type]:
+            if field == "image":
+                final = _media.storage_url((entity_type, entity_id, thumb_id), _media.thumbnail_name(filename))
+                self._set_pending(entity_type, entity_id, field, final)
+                self._media_state["thumbnail_ids"][(entity_type, entity_id)] = thumb_id
+            else:
+                # A filmstrip is not transcoded: it reads the uploaded file at once.
+                self._db[entity_type][entity_id][field] = _media.storage_url((entity_type, entity_id, thumb_id), filename)
+        return thumb_id
+
+    def _set_pending(self, entity_type, entity_id, field, final):
+        self._db[entity_type][entity_id][field] = _media.transient_url(self.config)
+        self._media_state["pending"][(entity_type, entity_id, field)] = final
+
+    def _tag_link(self, name):
+        """A link to the Tag of that name, created when missing (api3 053)."""
+        tag = self.find_one("Tag", [["name", "is", name]])
+        if tag is None:
+            tag = self.create("Tag", {"name": name})
+        return {"type": "Tag", "id": tag["id"]}
+
+    def _stored_bytes(self, url):
+        """The bytes a download URL serves; ShotgunFileDownloadError when nothing is stored there."""
+        if url.startswith("file://"):
+            # The client opens a local link's file:// URL with a urllib opener and wraps URLError.
+            try:
+                with urllib.request.build_opener().open(urllib.request.Request(url)) as response:
+                    return response.read()
+            except urllib.error.URLError as e:
+                raise ShotgunFileDownloadError("Failed to open %s\n%s" % (url, e))
+        attachment_id = _media.attachment_id_of(self.config, self._media_state, url)
+        row = self._db["Attachment"].get(attachment_id)
+        if row is None or row["__retired"] or attachment_id not in self._media_state["files"]:
+            raise ShotgunFileDownloadError(_media.download_failure(url))
+        return self._media_state["files"][attachment_id]
 
     def add_user_agent(self, agent):
         pass
@@ -640,12 +1068,12 @@ class Shotgun(object):
     ###################################################################################################
     # internal methods and members
 
-    def _log(self, rows, source=None, linked=True):
+    def _log(self, rows, source=None, linked=True, now=None):
         """Append event rows, filling id, entity, project, user and created_at."""
         if not rows or not self.generate_event_log_entries or "EventLogEntry" not in self._db:
             return
         table = self._db["EventLogEntry"]
-        now = self._clock()
+        now = now or self._clock()
         for partial in rows:
             event = self._get_new_row("EventLogEntry")
             event.update(partial)
@@ -682,19 +1110,31 @@ class Shotgun(object):
         if entity_type not in self._schema:
             raise ShotgunError("%s is not a valid entity" % entity_type)
 
-    def _validate_entity_data(self, entity_type, data):
+    def _validate_entity_data(self, entity_type, data, verb="update"):
+        """Raise ShotgunError on a value the site refuses; return data with each value as stored."""
         if "id" in data or "type" in data:
             raise ShotgunError("Can't set id or type on create or update")
 
-        self._validate_entity_fields(entity_type, data.keys())
-
+        fields = self._schema[entity_type]
         for field, item in data.items():
+            if "." in field:
+                self._validate_entity_fields(entity_type, [field])
+            elif field not in fields:
+                raise _writes.unknown_field(verb, entity_type, field, item)  # api3 039
 
-            if item is None:
-                # none is always ok
+        stored = dict(data)
+        for field, item in data.items():
+            if field not in fields:
                 continue
+            field_info = fields[field]
+            sg_type = field_info["data_type"]["value"]
+            editable = field_info.get("editable", {}).get("value", False)
+            item = stored[field] = _writes.check_value(verb, entity_type, field, sg_type, item, editable)
 
-            field_info = self._schema[entity_type][field]
+            if item is None or (entity_type, field) == ("Task", "splits"):
+                continue
+            if sg_type in _writes.RULES and sg_type not in ("multi_entity", "serializable"):
+                continue
 
             if field_info["data_type"]["value"] == "multi_entity":
                 if not isinstance(item, list):
@@ -767,6 +1207,8 @@ class Shotgun(object):
 
                 # TODO: add check for correct timezone
 
+        return stored
+
     def _validate_entity_fields(self, entity_type, fields):
         self._validate_entity_type(entity_type)
         if fields is not None:
@@ -780,22 +1222,31 @@ class Shotgun(object):
                         raise ShotgunError("%s is not a valid field for entity %s" % (field, entity_type))
 
     def _get_default_value(self, entity_type, field):
+        """Return the value a new row reads for this field."""
         field_info = self._schema[entity_type][field]
-        if field_info["data_type"]["value"] == "multi_entity":
-            default_value = []
-        else:
-            default_value = field_info["properties"]["default_value"]["value"]
+        field_type = field_info["data_type"]["value"]
+        default_value = field_info["properties"]["default_value"]["value"]
+        if field_type == "multi_entity":
+            return []  # field_types/multi_entity
+        if field_type == "checkbox":
+            return bool(default_value)  # field_types/checkbox: never None
+        if field_type == "password":
+            return "*******"  # field_types/password
+        if field_type == "pivot_column":
+            return None  # field_types/pivot_column
+        if field_type in ("text", "date") and default_value == "":
+            return None  # field_types/text, field_types/date
+        if field_type in ("number", "percent", "duration", "timecode") and isinstance(default_value, str):
+            # entity_types/Playlist: a "0" default reads 0.
+            return int(default_value) if default_value else None
+        if field_type == "float" and isinstance(default_value, str):
+            return float(default_value) if default_value else None
         return default_value
 
     def _get_new_row(self, entity_type):
         row = {"type": entity_type, "__retired": False}
         for field in self._schema[entity_type]:
-            field_info = self._schema[entity_type][field]
-            if field_info["data_type"]["value"] == "multi_entity":
-                default_value = []
-            else:
-                default_value = field_info["properties"]["default_value"]["value"]
-            row[field] = default_value
+            row[field] = self._get_default_value(entity_type, field)
         return row
 
     def _compare(self, field_type: str, lval: Any, operator: str, rval: Any) -> bool:
@@ -810,8 +1261,12 @@ class Shotgun(object):
         :returns: The result of the operator that was applied.
         :rtype: bool
         """
-        # If we have a list of scalar values
-        if isinstance(lval, list) and field_type != "multi_entity":
+        # A list of scalar values comes from a dotted path through a multi_entity field.
+        # A jsonb array is one value.
+        if isinstance(lval, list) and field_type not in ("multi_entity", "jsonb"):
+            # No linked row of the named type reads null (api3 012).
+            if not lval:
+                return self._compare(field_type, None, operator, rval)
             # Compare each one. If one matches the predicate we're good!
             return any((self._compare(field_type, sub_val, operator, rval)) for sub_val in lval)
 
@@ -820,22 +1275,55 @@ class Shotgun(object):
                 return lval == rval
             elif operator == "is_not":
                 return lval != rval
-        elif field_type in ("float", "number", "date", "date_time"):
+        elif field_type in ("float", "number", "percent", "duration", "timecode", "date", "date_time"):
+            is_date = field_type in ("date", "date_time")
+            if field_type == "date_time":
+                convert = self.config.convert_datetimes_to_utc
+                lval = _wire.client_datetime(lval, convert)
+                if isinstance(rval, (list, tuple)):
+                    rval = [_wire.client_datetime(v, convert) for v in rval]
+                else:
+                    rval = _wire.client_datetime(rval, convert)
+            # api3 014
+            if is_date and (operator in RELATIVE or operator in CALENDAR):
+                return relative_match(lval, operator, filter_values(rval), self._clock(), field_type == "date")
+            if is_date and operator in ("in", "not_in") and not isinstance(rval, list):
+                rval = [rval]
             if operator == "is":
                 return lval == rval
             elif operator == "is_not":
                 return lval != rval
+            # Comparisons exclude null rows; negations include them (field_types/number, field_types/date).
             elif operator == "less_than":
-                return lval < rval
+                return lval is not None and rval is not None and lval < rval
             elif operator == "greater_than":
-                return lval > rval
+                return lval is not None and rval is not None and lval > rval
             elif operator == "between":
-                return lval >= rval[0] and lval <= rval[1]
-            elif operator == "not_between":
-                return lval < rval[0] or lval > rval[1]
+                low, high = rval
+                if lval is None or low is None or high is None:
+                    return False
+                # A date range is order-insensitive (field_types/date).
+                if is_date and low > high:
+                    low, high = high, low
+                return low <= lval <= high
             elif operator == "in":
                 return lval in rval
-        elif field_type in ("list", "status_list"):
+            elif operator == "not_in":
+                return lval not in rval
+        elif field_type in ("list", "status_list", "entity_type", "color", "uuid"):
+            # A bare scalar stands for a one-element list, and "" for None (field_types/list, field_types/uuid).
+            if operator in ("in", "not_in"):
+                rval = rval if isinstance(rval, list) else [rval]
+                rval = [None if val == "" else val for val in rval]
+            elif rval == "":
+                rval = None
+            # List and status_list match case-insensitively, as text does (field_types/list).
+            if field_type in ("list", "status_list"):
+                lval = lval.lower() if isinstance(lval, str) else lval
+                if isinstance(rval, list):
+                    rval = [val.lower() if isinstance(val, str) else val for val in rval]
+                elif isinstance(rval, str):
+                    rval = rval.lower()
             if operator == "is":
                 return lval == rval
             elif operator == "is_not":
@@ -844,13 +1332,27 @@ class Shotgun(object):
                 return lval in rval
             elif operator == "not_in":
                 return lval not in rval
-        elif field_type == "entity_type":
+        elif field_type == "image":
             if operator == "is":
                 return lval == rval
+            elif operator == "is_not":
+                return lval != rval
+        elif field_type == "jsonb":
+            if operator == "is":
+                return lval == rval
+            elif operator == "is_not":
+                return lval != rval
+            elif operator == "contains":
+                return jsonb_contains(lval, rval)
+            elif operator == "not_contains":
+                return not jsonb_contains(lval, rval)
         elif field_type == "text":
             # Some operations expect a list but can deal with a single value
             if operator in ("in", "not_in") and not isinstance(rval, list):
                 rval = [rval]
+            # A "" write stores null, and `is ""` matches the null rows (api3 030).
+            elif operator in ("is", "is_not") and rval == "":
+                rval = None
             # Some operation expect a string but can deal with None
             elif operator in ("starts_with", "ends_with", "contains", "not_contains"):
                 lval = lval or ''
@@ -879,44 +1381,76 @@ class Shotgun(object):
             elif operator == "not_in":
                 return lval not in rval
         elif field_type == "entity":
+            # field_types/entity
+            if operator in ("in", "not_in") and isinstance(rval, dict):
+                rval = [rval]
             if operator == "is":
-                # If one of the two is None, ensure both are.
                 if lval is None or rval is None:
                     return lval == rval
-                # Both values are set, compare them.
                 return lval["type"] == rval["type"] and lval["id"] == rval["id"]
             elif operator == "is_not":
                 if lval is None or rval is None:
                     return lval != rval
-                if rval is None:
-                    # We already know lval is not None, so we know they are not equal.
-                    return True
                 return lval["type"] != rval["type"] or lval["id"] != rval["id"]
+            # `type_is None` means unset; unset rows match every negation (api3 010).
+            elif operator == "type_is" and rval is None:
+                return lval is None
+            elif operator == "type_is_not" and rval is None:
+                return lval is not None
+            elif lval is None and operator in ("in", "type_is", "name_is", "name_contains"):
+                return False
+            elif lval is None and operator in ("not_in", "type_is_not", "name_not_contains"):
+                return True
             elif operator == "in":
-                return all((lval["type"] == sub_rval["type"] and lval["id"] == sub_rval["id"]) for sub_rval in rval)
+                return any(_same_link(lval, sub_rval) for sub_rval in rval)
+            elif operator == "not_in":
+                return not any(_same_link(lval, sub_rval) for sub_rval in rval)
             elif operator == "type_is":
                 return lval["type"] == rval
             elif operator == "type_is_not":
                 return lval["type"] != rval
+            elif operator == "name_is":
+                return _link_name(lval) == rval
             elif operator == "name_contains":
-                return rval in lval["name"]
+                return rval in _link_name(lval)
             elif operator == "name_not_contains":
-                return rval not in lval["name"]
-            elif operator == "name_starts_with":
-                return lval["name"].startswith(rval)
-            elif operator == "name_ends_with":
-                return lval["name"].endswith(rval)
+                return rval not in _link_name(lval)
         elif field_type == "multi_entity":
+            # field_types/multi_entity
+            # filter_refusal has refused any other list length and an empty `in` list.
+            if operator == "is" and isinstance(rval, list):
+                rval = rval[0]
+            if operator in ("in", "not_in") and isinstance(rval, dict):
+                rval = [rval]
             if operator == "is":
                 if rval is None:
                     return len(lval) == 0
-                return rval["id"] in (sub_lval["id"] for sub_lval in lval)
+                return any(_same_link(sub_lval, rval) for sub_lval in lval)
             elif operator == "is_not":
                 if rval is None:
                     return len(lval) != 0
-                return rval["id"] not in (sub_lval["id"] for sub_lval in lval)
+                return not any(_same_link(sub_lval, rval) for sub_lval in lval)
+            elif operator == "in":
+                return any(_same_link(sub_lval, sub_rval) for sub_lval in lval for sub_rval in rval)
+            elif operator == "not_in":
+                return not any(_same_link(sub_lval, sub_rval) for sub_lval in lval for sub_rval in rval)
+            # `type_is None` means no links; empty rows match every negation (api3 011).
+            elif operator == "type_is" and rval is None:
+                return len(lval) == 0
+            elif operator == "type_is_not" and rval is None:
+                return len(lval) != 0
+            elif operator == "type_is":
+                return any(sub_lval["type"] == rval for sub_lval in lval)
+            elif operator == "type_is_not":
+                return not any(sub_lval["type"] == rval for sub_lval in lval)
+            elif operator == "name_is":
+                return any(_link_name(sub_lval) == rval for sub_lval in lval)
+            elif operator == "name_contains":
+                return any(rval in _link_name(sub_lval) for sub_lval in lval)
+            elif operator == "name_not_contains":
+                return not any(rval in _link_name(sub_lval) for sub_lval in lval)
 
-        raise ShotgunError("The %s operator is not supported on the %s type" % (operator, field_type))
+        raise ShotgunError("mockgun does not implement the '%s' relation on the '%s' data type" % (operator, field_type))
 
     def _get_field_from_row(self, entity_type, row, field):
         # split dotted form fields
@@ -952,10 +1486,9 @@ class Shotgun(object):
                 elif not isinstance(field_value, dict):
                     raise ShotgunError("Invalid deep query field %s.%s" % (entity_type, field))
 
-                # make sure that types in the query match type in the linked field
+                # A link to another type reads the path as null (field_types/entity).
                 if entity_type2 != field_value["type"]:
-                    raise ShotgunError("Deep query field %s.%s does not match type "
-                                       "with data %s" % (entity_type, field, field_value))
+                    return None
 
                 # ok so looks like the value is an entity link
                 # e.g. db contains: {"sg_sequence": {"type":"Sequence", "id": 123 } }
@@ -975,12 +1508,17 @@ class Shotgun(object):
                 return None
 
     def _get_field_type(self, entity_type, field):
-        # split dotted form fields
-        try:
-            field2, entity_type2, field3 = field.split(".", 2)
-            return self._get_field_type(entity_type2, field3)
-        except ValueError:
+        """Return the data type of a field or of the last field of a dotted path."""
+        parts = field.split(".")
+        if len(parts) < 3:
             return self._schema[entity_type][field]["data_type"]["value"]
+        # Each named type must have the field after it, whatever the link's valid_types (finding 016).
+        for i in range(1, len(parts) - 1, 2):
+            fields = self._schema.get(parts[i], {})
+            if parts[i + 1] not in fields:
+                # REST wording; api3 unprobed (sg-mockgun#39)
+                raise ShotgunError("%s.%s doesn't exist." % (entity_type, field))
+        return fields[parts[-1]]["data_type"]["value"]
 
     def _row_matches_filter(self, entity_type, row, sg_filter, retired_only):
 
@@ -1001,19 +1539,84 @@ class Shotgun(object):
 
             field_type = self._get_field_type(entity_type, field)
 
-            # if we're operating on an entity, we'll need to grab the name from the lval's row
-            if field_type == "entity":
-                # If the entity field is set, we'll retrieve the name of the entity.
-                if lval is not None:
-                    link_type = lval["type"]
-                    link_id = lval["id"]
-                    lval_row = self._db[link_type][link_id]
-                    if "name" in lval_row:
-                        lval["name"] = lval_row["name"]
-                    elif "code" in lval_row:
-                        lval["name"] = lval_row["code"]
+            # A link to a retired row reads None, or drops out of the list (api3 027).
+            if field_type == "entity" and isinstance(lval, dict) and self._is_retired_link(lval):
+                lval = None
+            elif field_type == "multi_entity" and isinstance(lval, list):
+                lval = [link for link in lval if not self._is_retired_link(link)]
+            elif field_type == "calculated":
+                field_type = calculated_type(self._field_properties(entity_type, field))
 
+            # Name operators compare the display name `find` returns, on copies of the stored links (finding 060).
+            if field_type == "entity" and isinstance(lval, dict):
+                lval = self._named_link(lval)
+            elif field_type == "multi_entity" and operator.startswith("name_") and isinstance(lval, list):
+                lval = [self._named_link(link) for link in lval]
+
+            if (entity_type, field) in IGNORED:
+                return True
             return self._compare(field_type, lval, operator, rval)
+
+    def _is_retired_link(self, link):
+        row = self._db.get(link.get("type"), {}).get(link.get("id"))
+        return bool(row and row.get("__retired"))
+
+    def _field_properties(self, entity_type, path):
+        """The schema properties of a field, or of the last field of a dotted path."""
+        parts = path.split(".")
+        return self._schema[parts[-2] if len(parts) > 1 else entity_type][parts[-1]].get("properties", {})
+
+    def _filter_field_type(self, entity_type, path):
+        """The data type a filter path ends on, or None when a hop names no field (api3 013)."""
+        parts = path.split(".")
+        if len(parts) % 2 == 0:
+            return None
+        fields = self._schema.get(entity_type, {})
+        for i in range(0, len(parts) - 1, 2):
+            if parts[i] not in fields:
+                return None
+            fields = self._schema.get(parts[i + 1], {})
+        if parts[-1] not in fields:
+            return None
+        return fields[parts[-1]]["data_type"]["value"]
+
+    def _validate_filters(self, entity_type, filters):
+        """Raise what the api3 client raises building ``filters``, then the site's refusal of any of them."""
+        disabled = _api3.SHOTGUN_API_DISABLE_ENTITY_OPTIMIZATION
+        for field, operator, rval in self._flat_filters(filters):
+            if client_index_error(field, operator, rval, disabled):
+                # api3 011, api3 015: the client's `values[0]` on an empty list.
+                raise IndexError("list index out of range")
+        for field, operator, rval in self._flat_filters(filters):
+            field_type = self._filter_field_type(entity_type, field)
+            if field_type is None:
+                raise Fault(unknown_field(entity_type, field, operator, rval))
+            last_type, last_field = entity_type, field
+            while last_field.count(".") >= 2:
+                _, last_type, last_field = last_field.split(".", 2)
+            if (last_type, last_field) in IGNORED:
+                continue
+            if field_type == "calculated":
+                # api3 002, api3 006
+                if operator in ("in", "not_in") and None in filter_values(rval):
+                    raise Fault("API read() CRUD ERROR #10: Read failed for entity type [%s]" % last_type)
+                field_type = calculated_type(self._field_properties(entity_type, field))
+            refusal = filter_refusal(last_type, last_field, field_type, operator, rval, path=field)
+            if refusal:
+                raise Fault(refusal)
+
+    def _flat_filters(self, filters):
+        """Each ``[field, operator, value]`` in ``filters``, nested groups included."""
+        for sg_filter in self._rearrange_filters(filters):
+            if len(sg_filter) != 3:
+                continue
+            field, operator, rval = sg_filter
+            if field is None:
+                if operator in ("any", "all"):
+                    for nested in self._flat_filters(rval):
+                        yield nested
+                continue
+            yield field, operator, rval
 
     def _rearrange_filters(self, filters: list) -> None:
         """
@@ -1099,9 +1702,357 @@ class Shotgun(object):
                     ]
                 elif update_mode == "set":
                     row[field] = [{"type": item["type"], "id": item["id"]} for item in data[field]]
+            elif field_type == "text" and isinstance(data[field], str):
+                # field_types/text: both ends stripped, and an empty string is stored as None.
+                row[field] = data[field].strip() or None
             else:
                 row[field] = data[field]
 
-    def _validate_entity_exists(self, entity_type, entity_id):
+    def _read_field(self, entity_type, row, field):
+        """Return a field as a site returns it, with entity links named (finding 060)."""
+        value = self._get_field_from_row(entity_type, row, field)
+        try:
+            field_type = self._get_field_type(entity_type, field)
+        except KeyError:
+            return value
+        if field_type not in ("entity", "multi_entity"):
+            return value
+        if isinstance(value, list):
+            links = [self._live_link(item) for item in value]
+            links = [link for link in links if link is not None]
+            if entity_type == "Note" and field == "tasks":
+                # api3 026: Note.tasks elements add the Task's template_task id.
+                for link in links:
+                    task = self._db["Task"].get(link["id"], {})
+                    link["template_task_id"] = (task.get("template_task") or {}).get("id")
+            return links
+        return self._live_link(value)
+
+    def _live_link(self, link):
+        """A named link, or None when its target is retired (api3 027)."""
+        if isinstance(link, dict) and "type" in link and "id" in link:
+            target = self._db.get(link["type"], {}).get(link["id"])
+            if target is not None and target.get("__retired"):
+                return None
+        return self._named_link(link)
+
+    def _named_link(self, link):
+        """Return an entity link as {type, id, name}, where name is the target's cached_display_name."""
+        if not isinstance(link, dict) or "type" not in link or "id" not in link:
+            # A dotted path through a multi_entity returns nested lists.
+            return [self._named_link(item) for item in link] if isinstance(link, list) else link
+        target = self._db.get(link["type"], {}).get(link["id"])
+        name = display_name(link["type"], target) if target is not None else link.get("name")
+        return {"type": link["type"], "id": link["id"], "name": name}
+
+    def _validate_entity_exists(self, entity_type, entity_id, verb=None):
         if entity_id not in self._db[entity_type]:
+            if verb in ("update", "delete"):
+                raise Fault(_records.missing_entity(verb, entity_type, entity_id))  # api3 063
             raise ShotgunError("No entity of type %s exists with id %s" % (entity_type, entity_id))
+
+    def _next_id(self, entity_type):
+        """Hand out the next id for a type, past every id already in the table or spent."""
+        next_id = max(max(self._db[entity_type], default=0), self._spent_ids.get(entity_type, 0)) + 1
+        self._spent_ids[entity_type] = next_id
+        return next_id
+
+    def _check_create_contract(self, entity_type, data, return_fields):
+        """Raise the Fault a site answers for a create with no fields, no project or an empty identity."""
+        if not data:
+            raise Fault(_records.no_fields(entity_type, return_fields))  # api3 060, 061
+        if self.require_project and entity_type in _records.PROJECT_SCOPED and "project" not in data:
+            raise Fault(_records.missing_project(data))  # api3 060
+        identity = _records.IDENTITY_FIELDS.get(entity_type)
+        if identity in data and data[identity] in ("", None):
+            self._next_id(entity_type)  # api3 060: the refused create spends an id.
+            raise Fault(_records.empty_identity(entity_type))
+
+    def _check_status(self, entity_type, data, verb):
+        """Refuse a status outside ``valid_values``; return data with "" stored as None (api3 062)."""
+        out = dict(data)
+        for field, value in data.items():
+            info = self._schema[entity_type].get(field)
+            if not info or info["data_type"]["value"] != "status_list":
+                continue
+            if value in ("", None):
+                out[field] = None
+                continue
+            valid = info["properties"]["valid_values"]["value"]
+            if value not in valid:
+                raise Fault(_records.bad_status(verb, entity_type, field, value, valid))
+        return out
+
+    def _apply_delete_effects(self, entity_type, entity_id):
+        """Null entity links to a deleted row and retire Versions it is the `entity` of (api3 027, 065)."""
+        link = {"type": entity_type, "id": entity_id}
+        cleared, retired = [], []
+        for other_type, rows in self._db.items():
+            if other_type == "EventLogEntry":
+                continue
+            fields = [f for f, info in self._schema[other_type].items() if info["data_type"]["value"] == "entity"]
+            for row in rows.values():
+                for field in fields:
+                    value = row.get(field)
+                    if row["__retired"] or not isinstance(value, dict) or not _same_link(value, link):
+                        continue
+                    if other_type == "Version" and field == "entity":
+                        retired.append(row["id"])
+                    else:
+                        row[field] = None
+                        cleared.append((other_type, row["id"], field))
+        for version_id in retired:
+            self.delete("Version", version_id)
+        self._delete_effects[(entity_type, entity_id)] = (cleared, retired)
+
+    def _undo_delete_effects(self, entity_type, entity_id):
+        """Put back what deleting a row changed on other rows, where nothing has set them since."""
+        cleared, retired = self._delete_effects.pop((entity_type, entity_id), ([], []))
+        for version_id in retired:
+            self.revive("Version", version_id)
+        for other_type, other_id, field in cleared:
+            row = self._db[other_type].get(other_id)
+            if row is not None and row.get(field) is None:
+                row[field] = {"type": entity_type, "id": entity_id}
+
+    ###################################################################################################
+    # summarize, text_search, info (sg_mockgun.summarize, sg_mockgun.text_search, sg_mockgun.site_info)
+
+    def summarize(self, entity_type, filters, summary_fields, filter_operator=None, grouping=None,
+                  include_archived_projects=True):
+        """Summarize the rows ``filters`` selects, optionally grouped (api3 040 to 042)."""
+        # Client-side checks and translation follow shotgun_api3.Shotgun.summarize.
+        if not isinstance(grouping, list) and grouping is not None:
+            raise ValueError("summarize() 'grouping' parameter must be a list or None")
+        if isinstance(filters, (list, tuple)):
+            filters = _translate_filters(filters, filter_operator)
+        params = {"type": entity_type, "summaries": summary_fields, "filters": filters}
+        if include_archived_projects is False:
+            params["include_archived_projects"] = False
+        if grouping is not None:
+            params["grouping"] = grouping
+        field_type = lambda field: self._field_type_or_none(entity_type, field)  # noqa: E731
+        _summarize.check_request(entity_type, params, self._schema, field_type)
+        python_filters, operator = _wire.filters_from_wire(filters)
+        fields = [s["field"] for s in summary_fields] + [g["field"] for g in grouping or []]
+        rows = self.find(entity_type, python_filters, fields, filter_operator=operator,
+                         include_archived_projects=include_archived_projects)
+        return _summarize.summarize(rows, summary_fields, grouping, field_type, self._status_order(entity_type))
+
+    def text_search(self, text, entity_types, project_ids=None, limit=None):
+        """Search the names of rows of ``entity_types`` for every word of ``text`` (api3 043 to 045)."""
+        # Client-side checks and translation follow shotgun_api3.Shotgun.text_search.
+        if not isinstance(entity_types, dict):
+            raise ValueError("entity_types parameter must be a dictionary")
+        api_entity_types = {}
+        for entity_type, filter_list in entity_types.items():
+            if not isinstance(filter_list, (list, tuple)):
+                raise ValueError("value of entity_types['%s'] must be a list or tuple." % entity_type)
+            api_entity_types[entity_type] = _translate_filters(filter_list, filter_operator=None)
+        params = {"text": text, "entity_types": api_entity_types, "project_ids": project_ids or [],
+                  "max_results": limit}
+        _text_search.check_request(params, self._schema)
+        _text_search.row_limit(limit)
+        # api3 045: no entity type searches every type.
+        searched = api_entity_types or dict((t, {"logical_operator": "and", "conditions": []}) for t in self._db)
+        rows = []
+        for entity_type, node in searched.items():
+            node = self._searchable_conditions(entity_type, node)
+            python_filters, operator = _wire.filters_from_wire(node)
+            for found in self.find(entity_type, python_filters, filter_operator=operator):
+                match = self._search_match(entity_type, self._db[entity_type][found["id"]])
+                if match["name"] is None:
+                    continue  # unprobed: a row with no display name, an EventLogEntry, is not searched
+                if not params["project_ids"] or match["project_id"] in params["project_ids"]:
+                    rows.append(match)
+        return _text_search.search(text, rows, limit)
+
+    def info(self):
+        """The site's API metadata. It needs no credentials (api3 046)."""
+        return copy.deepcopy(self._info)
+
+    def set_info(self, **values):
+        """Change keys of the payload ``info()`` answers, e.g. ``set_info(version=[8, 92, 0])``."""
+        self._info.update(copy.deepcopy(values))
+
+    def connect(self):
+        """Do what the client's connect does: read ``info()``, return None (api3 046)."""
+        self.info()
+
+    def close(self):
+        """Do what the client's close does when no connection is open: nothing."""
+
+    # Upstream mockgun has neither attribute and its callers assign both, so an assigned value wins.
+    # The client builds both from one info() payload: server_caps follows an assigned server_info.
+    @property
+    def server_info(self):
+        """The assigned value, else the ``info()`` payload."""
+        if "_server_info" in self.__dict__:
+            return self.__dict__["_server_info"]
+        return self.info()
+
+    @server_info.setter
+    def server_info(self, value):
+        self.__dict__["_server_info"] = value
+
+    @server_info.deleter
+    def server_info(self):
+        self.__dict__.pop("_server_info", None)
+
+    @property
+    def server_caps(self):
+        """The assigned value, else the client's ``ServerCapabilities`` built from ``server_info``."""
+        if "_server_caps" in self.__dict__:
+            return self.__dict__["_server_caps"]
+        info = self.__dict__.get("_server_info")
+        return ServerCapabilities(self.config.server, info if isinstance(info, dict) else self.info())
+
+    @server_caps.setter
+    def server_caps(self, value):
+        self.__dict__["_server_caps"] = value
+
+    @server_caps.deleter
+    def server_caps(self):
+        self.__dict__.pop("_server_caps", None)
+
+    def _field_type_or_none(self, entity_type, field):
+        if not isinstance(field, str):
+            return None
+        try:
+            return self._get_field_type(entity_type, field)
+        except (KeyError, ShotgunError):
+            return None
+
+    def _status_order(self, entity_type):
+        def order(field):
+            try:
+                return list(self._schema[entity_type][field]["properties"]["valid_values"]["value"])
+            except KeyError:
+                return []
+        return order
+
+    def _searchable_conditions(self, entity_type, node):
+        """Drop conditions on fields the type lacks, and refuse a relation no data type has (api3 045)."""
+        kept = []
+        for condition in node.get("conditions", []):
+            if "conditions" in condition:
+                kept.append(self._searchable_conditions(entity_type, condition))
+                continue
+            if self._field_type_or_none(entity_type, condition["path"]) is None:
+                continue
+            if condition["relation"] not in _ALL_RELATIONS:
+                raise Fault("Uncaught exception! No condition node type matches <%s> for column %s a.%s"
+                            % (condition["relation"], entity_type, condition["path"]))
+            kept.append(condition)
+        return dict(node, conditions=kept)
+
+    def _search_match(self, entity_type, row):
+        """One row as ``text_search`` returns it (api3 043)."""
+        link = row.get("entity")
+        links = ["", ""]
+        if isinstance(link, dict) and link.get("type") in self._db:
+            target = self._db[link["type"]].get(link["id"])
+            if target is not None:
+                links = [link["type"], display_name(link["type"], target) or ""]
+        project = row.get("project")
+        return {
+            "id": row["id"], "type": entity_type, "name": display_name(entity_type, row),
+            "project_id": project.get("id") if isinstance(project, dict) else None,
+            "links": links, "status": row.get("sg_status_list"), "image": row.get("image"),
+        }
+
+    ###################################################################################################
+    # seeding and snapshots (sg_mockgun.seed)
+
+    def load(self, source):
+        """Add the records in a seed file, or an already parsed dict, without event log rows."""
+        _seed.load(self, source)
+
+    def snapshot(self):
+        """A copy of this instance's records and schema, for ``restore``."""
+        return _seed.snapshot(self)
+
+    def restore(self, state):
+        """Put this instance's records and schema back to a ``snapshot``."""
+        _seed.restore(self, state)
+
+    ###################################################################################################
+    # attention, navigation and site reads (sg_mockgun.attention, api3 047 to 052)
+
+    def note_thread_read(self, note_id, entity_fields=None):
+        """Return a Note, its Replies and its Attachments, oldest first."""
+        entity_fields = entity_fields or {}
+        if not isinstance(entity_fields, dict):
+            raise ValueError("entity_fields parameter must be a dictionary")
+        return _attention.note_thread_contents(self, note_id, entity_fields)
+
+    def activity_stream_read(self, entity_type, entity_id, entity_fields=None, min_id=None, max_id=None, limit=None):
+        """Return the ``create`` updates on a record and on the rows linked to it, newest first."""
+        entity_fields = entity_fields or {}
+        if not isinstance(entity_fields, dict):
+            raise ValueError("entity_fields parameter must be a dictionary")
+        return _attention.activity_stream(self, entity_type, entity_id, entity_fields, min_id, max_id, limit)
+
+    def followers(self, entity):
+        """Return the HumanUsers following ``entity``."""
+        return _attention.followers(self, entity)
+
+    def following(self, user, project=None, entity_type=None):
+        """Return the ``{type, id}`` of every record ``user`` follows."""
+        params = {"user": user}
+        if project:
+            params["project"] = project
+        if entity_type:
+            params["entity_type"] = entity_type
+        return _attention.following(self, params)
+
+    def set_following(self, user, entities):
+        """Make ``user`` (a HumanUser link) follow exactly ``entities``."""
+        _attention.state(self)["follows"][user["id"]] = [{"type": e["type"], "id": e["id"]} for e in entities]
+
+    def nav_expand(self, path, seed_entity_field=None, entity_fields=None):
+        """Return the navigation node at ``path`` with its children."""
+        return _attention.nav_expand(self, path, seed_entity_field, entity_fields)
+
+    def nav_search_string(self, root_path, search_string, seed_entity_field=None):
+        """Return the navigation rows under ``root_path`` whose label contains ``search_string``."""
+        return _attention.nav_search(self, root_path, {"search_string": search_string})
+
+    def nav_search_entity(self, root_path, entity, seed_entity_field=None):
+        """Return the navigation row of ``entity`` under ``root_path``."""
+        return _attention.nav_search(self, root_path, {"entity": entity})
+
+    def preferences_read(self, prefs=None):
+        """Return the site preferences, or only those named in ``prefs``."""
+        return _attention.preferences_read(self, prefs or [])
+
+    def set_preferences(self, values):
+        """Change site preferences for ``preferences_read``."""
+        _attention.state(self)["preferences"].update(values)
+
+    def work_schedule_read(self, start_date, end_date, project=None, user=None):
+        """Return the work day rule of each date from ``start_date`` to ``end_date`` inclusive."""
+        if not isinstance(start_date, str) or not isinstance(end_date, str):
+            raise ShotgunError("The start_date and end_date arguments must be strings in YYYY-MM-DD format")
+        return _attention.work_schedule_read(
+            self, {"start_date": start_date, "end_date": end_date, "project": project, "user": user})
+
+    def set_work_schedule(self, week=None, exceptions=None):
+        """Set the studio week (seven booleans, Monday first) and per-date rules for ``work_schedule_read``."""
+        state = _attention.state(self)
+        if week is not None:
+            state["work_week"] = list(week)
+        if exceptions is not None:
+            state["work_exceptions"] = dict(exceptions)
+
+    def user_subscriptions_read(self):
+        """Return the subscription of each HumanUser, keyed by the user id as a string."""
+        return dict(_attention.state(self)["subscriptions"])
+
+    def set_user_subscriptions(self, subscriptions):
+        """Set what ``user_subscriptions_read`` returns."""
+        _attention.state(self)["subscriptions"] = dict(subscriptions)
+
+    def export_page(self, page_id, format, layout_name=None):
+        """Refuse a page export the way a site with no exportable page does."""
+        return _attention.export_page(self, {"format": format, "page_id": page_id, "layout_name": layout_name})

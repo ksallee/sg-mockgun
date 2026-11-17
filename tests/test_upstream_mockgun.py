@@ -84,7 +84,9 @@ class TestValidateFilterSyntax(unittest.TestCase):
             "https://test.shotgunstudio.com", login="user", password="1234"
         )
 
-        self._mockgun.create("Shot", {"code": "shot"})
+        # sg-mockgun: a Shot create needs a project (api3 060).
+        project = self._mockgun.create("Project", {"name": "project"})
+        self._mockgun.create("Shot", {"code": "shot", "project": project})
 
     def test_filter_array_or_dict(self):
         """
@@ -471,31 +473,40 @@ class TestMultiEntityFieldUpdate(unittest.TestCase):
             "https://test.shotgunstudio.com", login="user", password="1234"
         )
 
-        # Create two versions to assign to the shot.
-        self._version1 = self._mockgun.create("Version", {"code": "version1"})
-        self._version2 = self._mockgun.create("Version", {"code": "version2"})
-        self._version3 = self._mockgun.create("Version", {"code": "version3"})
+        # sg-mockgun: Version and Playlist creates need a project (api3 060).
+        project = self._mockgun.create("Project", {"name": "project"})
 
-        # remove 'code' field for later comparisons
-        del self._version1["code"]
-        del self._version2["code"]
-        del self._version3["code"]
+        # Create two versions to assign to the shot.
+        self._version1 = self._mockgun.create("Version", {"code": "version1", "project": project})
+        self._version2 = self._mockgun.create("Version", {"code": "version2", "project": project})
+        self._version3 = self._mockgun.create("Version", {"code": "version3", "project": project})
+
+        # remove 'code' and 'project' fields for later comparisons
+        for version in (self._version1, self._version2, self._version3):
+            del version["code"]
+            del version["project"]
+
+        # sg-mockgun: a returned link has the target's name (sg-groundtruth finding 060).
+        self._version1["name"] = "version1"
+        self._version2["name"] = "version2"
+        self._version3["name"] = "version3"
 
         # Create playlists
         self._add_playlist = self._mockgun.create(
             "Playlist",
-            {"code": "playlist1", "versions": [self._version1, self._version2]},
+            {"code": "playlist1", "project": project, "versions": [self._version1, self._version2]},
         )
         self._remove_playlist = self._mockgun.create(
             "Playlist",
             {
                 "code": "playlist1",
+                "project": project,
                 "versions": [self._version1, self._version2, self._version3],
             },
         )
         self._set_playlist = self._mockgun.create(
             "Playlist",
-            {"code": "playlist1", "versions": [self._version1, self._version2]},
+            {"code": "playlist1", "project": project, "versions": [self._version1, self._version2]},
         )
 
     def test_update_add(self):
@@ -651,7 +662,8 @@ class TestFilterOperator(unittest.TestCase):
         shots = self._mockgun.find(
             *find_args, order=[{"field_name": "description", "direction": "asc"}]
         )
-        self.assertEqual([s["code"] for s in shots], ["shot2", "shot1", "shot3"])
+        # api3 025: None sorts last ascending and descending.
+        self.assertEqual([s["code"] for s in shots], ["shot1", "shot3", "shot2"])
 
         shots = self._mockgun.find(
             *find_args, order=[{"field_name": "description", "direction": "desc"}]
@@ -662,7 +674,8 @@ class TestFilterOperator(unittest.TestCase):
         shots = self._mockgun.find(
             *find_args, order=[{"field_name": "sg_cut_order", "direction": "asc"}]
         )
-        self.assertEqual([s["code"] for s in shots], ["shot3", "shot2", "shot1"])
+        # api3 025: None sorts last.
+        self.assertEqual([s["code"] for s in shots], ["shot2", "shot1", "shot3"])
 
         # float field
         users = self._mockgun.find(
@@ -671,7 +684,8 @@ class TestFilterOperator(unittest.TestCase):
             ["login"],
             order=[{"field_name": "password_strength", "direction": "asc"}],
         )
-        self.assertEqual([u["login"] for u in users], ["user2", "user1"])
+        # api3 025: None sorts last.
+        self.assertEqual([u["login"] for u in users], ["user1", "user2"])
 
         # date_time field
         users = self._mockgun.find(
@@ -680,7 +694,8 @@ class TestFilterOperator(unittest.TestCase):
             ["login"],
             order=[{"field_name": "created_at", "direction": "asc"}],
         )
-        self.assertEqual([u["login"] for u in users], ["user1", "user2"])
+        # api3 038: a new row's created_at is set to now, so user1 sorts after user2's 2025 date.
+        self.assertEqual([u["login"] for u in users], ["user2", "user1"])
 
     def test_nested_filter_operators(self):
         """

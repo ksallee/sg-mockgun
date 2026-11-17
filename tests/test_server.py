@@ -14,6 +14,7 @@ from sg_mockgun.server import make_server
 def site():
     Mockgun.set_schema_paths(*schemas.paths())
     mock = Mockgun("https://mock.example.com", script_name="server", api_key="x")
+    mock.require_project = False  # the create contract is tested in test_records.py
     server = make_server(mock, "127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -104,3 +105,54 @@ def test_events_name_the_calling_script(site):
     sg.create("Shot", {"code": "x"})
     new = sg.find_one("EventLogEntry", [["event_type", "is", "Shotgun_Shot_New"]], ["user", "description"])
     assert new["description"] == "pipeline created new Shot "
+
+
+def test_info_has_the_site_keys_and_needs_no_credentials(site):  # api3 046
+    sg, mock = site
+    assert sg.info() == mock.info()
+    assert "totango_site_id" not in sg.info()
+    stranger = shotgun_api3.Shotgun(sg.base_url, script_name="nobody", api_key="wrong", connect=False)
+    assert stranger.info() == mock.info()
+    assert sg.connect() is None
+
+
+def test_summarize_over_the_wire(site):  # api3 040, 041
+    sg, _ = site
+    project = sg.create("Project", {"name": "Demo"})
+    for status in ("wtg", "wtg", "ip"):
+        sg.create("Task", {"content": "Anim", "project": project, "sg_status_list": status,
+                           "due_date": datetime.date(2026, 3, 4)})
+    on_project = [["project", "is", project]]
+    answer = sg.summarize("Task", on_project, [{"field": "id", "type": "count"}, {"field": "due_date", "type": "latest"}],
+                          grouping=[{"field": "sg_status_list", "type": "exact", "direction": "asc"}])
+    assert answer["summaries"] == {"id": 3, "due_date": "2026-03-04"}
+    assert [(x["group_value"], x["summaries"]["id"]) for x in answer["groups"]] == [("wtg", 2), ("ip", 1)]
+    either = sg.summarize("Task", on_project + [["id", "is", 0]], [{"field": "id", "type": "count"}],
+                          filter_operator="any")
+    assert either["summaries"] == {"id": 3}
+    with pytest.raises(shotgun_api3.Fault, match="duplicate summary request for field 'id'"):
+        sg.summarize("Task", on_project, [{"field": "id", "type": "count"}, {"field": "id", "type": "maximum"}])
+
+
+def test_text_search_over_the_wire(site):  # api3 043, 045
+    sg, _ = site
+    project = sg.create("Project", {"name": "Demo"})
+    shot = sg.create("Shot", {"code": "sq010_sh010", "project": project})
+    sg.create("Version", {"code": "v001", "entity": shot, "project": project})
+    answer = sg.text_search("sq010", {"Shot": [["project", "is", project]], "Version": []},
+                            project_ids=[project["id"]])
+    assert answer["terms"] == ["sq010"]
+    assert [(m["type"], m["links"]) for m in answer["matches"]] == [("Shot", ["", ""]), ("Version", ["Shot", "sq010_sh010"])]
+    with pytest.raises(shotgun_api3.Fault, match="query text too short! must be 3 or more characters"):
+        sg.text_search("ab", {"Shot": []})
+
+
+def test_batch_over_the_wire_is_atomic(site):
+    # api3 063
+    sg, _ = site
+    with pytest.raises(shotgun_api3.Fault, match=r"^API batch\(\) request with index 1 failed\.  All requests rolled back\.\n"):
+        sg.batch([
+            {"request_type": "create", "entity_type": "Shot", "data": {"code": "a"}},
+            {"request_type": "update", "entity_type": "Shot", "entity_id": 0, "data": {"code": "b"}},
+        ])
+    assert sg.find("Shot", []) == []
