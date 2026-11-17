@@ -8,9 +8,10 @@ _DATE = [
     "in_calendar_week", "in_calendar_month", "in_calendar_day", "in_calendar_year", "between", "in", "not_in",
 ]
 _CHOICE = ["is", "is_not", "in", "not_in"]
+_LINK = ["is", "is_not", "name_contains", "name_not_contains", "name_is", "type_is", "type_is_not", "in", "not_in"]
 
 # The `Valid relations` list each data type answers, in the site's order (finding 017,
-# field_types/<type>). Entity and multi_entity are not listed here.
+# field_types/<type>).
 RELATIONS = {
     "text": ["contains", "not_contains", "is", "is_not", "starts_with", "ends_with", "in", "not_in"],
     "number": _NUMERIC,
@@ -29,6 +30,8 @@ RELATIONS = {
     "image": ["is", "is_not"],
     "jsonb": ["is", "is_not", "contains", "not_contains"],
     "pivot_column": ["is", "is_not"],
+    "entity": _LINK,  # field_types/entity
+    "multi_entity": _LINK,  # field_types/multi_entity
 }
 
 # finding 017
@@ -59,9 +62,17 @@ def filter_refusal(entity_type, field, data_type, operator, rval):
     # field_types/number
     if operator == "between" and not (isinstance(rval, list) and len(rval) == 2):
         return "API read() 'between' 'relation' expects a 2-element array: %s" % _values(rval)
-    # field_types/uuid
-    if operator == "in" and rval == []:
+    # field_types/uuid, field_types/multi_entity. Entity `in []` is unmeasured (sg-mockgun#39).
+    if operator == "in" and rval == [] and data_type != "entity":
         return "API read() 'in' 'relation' expects at least a 1-element array: []"
+    if data_type == "multi_entity" and operator == "not_in" and rval == []:
+        return "API read() 'not_in' 'relation' expects at least a 1-element array: []"
+    # field_types/multi_entity
+    if data_type == "multi_entity" and operator == "is" and isinstance(rval, list) and len(rval) != 1:
+        return "API read() 'is' 'relation' expects a 1-element array: %s" % ruby_inspect(rval)
+    # field_types/entity: REST answers 400; its wording is unmeasured (sg-mockgun#39).
+    if data_type == "entity" and operator in ("name_is", "name_contains", "name_not_contains") and rval is None:
+        return "API read() '%s' 'relation' does not accept a null value" % operator
     # field_types/checkbox
     if data_type == "checkbox" and rval is None:
         return "API read() %s expected [String, FalseClass, TrueClass] data type(s) but got NilClass: nil" % path

@@ -452,6 +452,9 @@ class Shotgun(object):
             # traditiona style sg filters
             resolved_filters = filters
 
+        # validated before the scan; empty-table case unprobed (sg-mockgun#39)
+        self._validate_filters(entity_type, resolved_filters)
+
         results = [
             # Apply the filters for every single entities for the given entity type.
             row for row in self._db[entity_type].values()
@@ -1003,9 +1006,6 @@ class Shotgun(object):
                 return lval not in rval
         elif field_type == "entity":
             # field_types/entity
-            if operator in ("name_is", "name_contains", "name_not_contains") and rval is None:
-                # wording unmeasured; REST answers 400 (sg-mockgun#39)
-                raise ShotgunError("API read() '%s' 'relation' does not accept a null value" % operator)
             if operator in ("in", "not_in") and isinstance(rval, dict):
                 rval = [rval]
             if operator == "is":
@@ -1041,21 +1041,11 @@ class Shotgun(object):
                 return rval not in _link_name(lval)
         elif field_type == "multi_entity":
             # field_types/multi_entity
+            # filter_refusal has refused any other list length and an empty `in` list.
             if operator == "is" and isinstance(rval, list):
-                if len(rval) != 1:
-                    # REST wording; api3 unprobed (sg-mockgun#39)
-                    raise ShotgunError(
-                        "API read() 'is' 'relation' expects a 1-element array: %s" % ruby_inspect(rval)
-                    )
                 rval = rval[0]
-            if operator in ("in", "not_in"):
-                if isinstance(rval, dict):
-                    rval = [rval]
-                if not rval:
-                    # REST wording; api3 unprobed (sg-mockgun#39)
-                    raise ShotgunError(
-                        "API read() '%s' 'relation' expects at least a 1-element array: []" % operator
-                    )
+            if operator in ("in", "not_in") and isinstance(rval, dict):
+                rval = [rval]
             if operator == "is":
                 if rval is None:
                     return len(lval) == 0
@@ -1166,7 +1156,7 @@ class Shotgun(object):
 
             field_type = self._get_field_type(entity_type, field)
 
-            # Name operators compare the linked row's name, on copies of the stored links.
+            # Name operators compare the display name `find` returns, on copies of the stored links (finding 060).
             if field_type == "entity" and isinstance(lval, dict):
                 lval = self._named_link(lval)
             elif field_type == "multi_entity" and operator.startswith("name_") and isinstance(lval, list):
@@ -1176,15 +1166,22 @@ class Shotgun(object):
                 return True
             return self._compare(field_type, lval, operator, rval)
 
-    def _named_link(self, link):
-        """A copy of an entity link with ``name`` set from the linked row's ``name`` or ``code``."""
-        link = dict(link)
-        linked_row = self._db[link["type"]][link["id"]]
-        if "name" in linked_row:
-            link["name"] = linked_row["name"]
-        elif "code" in linked_row:
-            link["name"] = linked_row["code"]
-        return link
+    def _validate_filters(self, entity_type, filters):
+        """Raise the site's refusal of any filter in ``filters``, nested groups included."""
+        for sg_filter in self._rearrange_filters(filters):
+            if len(sg_filter) != 3:
+                continue
+            field, operator, rval = sg_filter
+            if field is None:
+                if operator in ("any", "all"):
+                    self._validate_filters(entity_type, rval)
+                continue
+            try:
+                field_type = self._get_field_type(entity_type, field)
+            except KeyError:
+                # An unknown field is raised by the row scan.
+                continue
+            self._filter_ignored(entity_type, field, field_type, operator, rval)
 
     def _filter_ignored(self, entity_type, field, field_type, operator, rval):
         """Raise the site's refusal of a filter, or say whether the site ignores it and returns every row."""
