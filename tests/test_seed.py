@@ -15,7 +15,9 @@ SMALL = os.path.join(os.path.dirname(__file__), "fixtures", "seed", "small.json"
 @pytest.fixture
 def sg():
     Shotgun.set_schema_paths(*schemas.paths())
-    return Shotgun("https://mock.example.com", script_name="seed", api_key="x")
+    sg = Shotgun("https://mock.example.com", script_name="seed", api_key="x")
+    sg.require_project = False  # the create contract is tested in test_records.py
+    return sg
 
 
 def write(tmp_path, data):

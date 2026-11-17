@@ -14,6 +14,7 @@ from sg_mockgun.server import make_server
 def site():
     Mockgun.set_schema_paths(*schemas.paths())
     mock = Mockgun("https://mock.example.com", script_name="server", api_key="x")
+    mock.require_project = False  # the create contract is tested in test_records.py
     server = make_server(mock, "127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

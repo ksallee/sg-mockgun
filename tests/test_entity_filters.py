@@ -16,7 +16,9 @@ def sg():
         os.path.join(SCHEMA, "schema.pickle"),
         os.path.join(SCHEMA, "schema_entity.pickle"),
     )
-    return Mockgun("https://test.shotgunstudio.com", login="user", password="1234")
+    sg = Mockgun("https://test.shotgunstudio.com", login="user", password="1234")
+    sg.require_project = False  # the create contract is tested in test_records.py
+    return sg
 
 
 @pytest.fixture

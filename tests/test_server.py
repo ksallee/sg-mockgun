@@ -14,6 +14,7 @@ from sg_mockgun.server import make_server
 def site():
     Mockgun.set_schema_paths(*schemas.paths())
     mock = Mockgun("https://mock.example.com", script_name="server", api_key="x")
+    mock.require_project = False  # the create contract is tested in test_records.py
     server = make_server(mock, "127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -144,3 +145,14 @@ def test_text_search_over_the_wire(site):  # api3 043, 045
     assert [(m["type"], m["links"]) for m in answer["matches"]] == [("Shot", ["", ""]), ("Version", ["Shot", "sq010_sh010"])]
     with pytest.raises(shotgun_api3.Fault, match="query text too short! must be 3 or more characters"):
         sg.text_search("ab", {"Shot": []})
+
+
+def test_batch_over_the_wire_is_atomic(site):
+    # api3 063
+    sg, _ = site
+    with pytest.raises(shotgun_api3.Fault, match=r"^API batch\(\) request with index 1 failed\.  All requests rolled back\.\n"):
+        sg.batch([
+            {"request_type": "create", "entity_type": "Shot", "data": {"code": "a"}},
+            {"request_type": "update", "entity_type": "Shot", "entity_id": 0, "data": {"code": "b"}},
+        ])
+    assert sg.find("Shot", []) == []

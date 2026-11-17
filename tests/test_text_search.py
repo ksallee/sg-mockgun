@@ -81,8 +81,9 @@ def test_filters_project_ids_and_limit(site):  # api3 043, 045
 
 
 def test_the_default_limit_is_25(sg):  # api3 043
+    project = sg.create("Project", {"name": "Demo"})
     for i in range(30):
-        sg.create("Shot", {"code": "zz_%02d" % i})
+        sg.create("Shot", {"code": "zz_%02d" % i, "project": project})
     assert len(sg.text_search("zz_", {"Shot": []})["matches"]) == 25
     assert len(sg.text_search("zz_", {"Shot": []}, limit=26)["matches"]) == 26
 

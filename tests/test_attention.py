@@ -13,7 +13,9 @@ UTC = datetime.timezone.utc
 @pytest.fixture
 def sg():
     Mockgun.set_schema_paths(*schemas.paths())
-    return Mockgun("https://mock.example.com", script_name="probe", api_key="x")
+    sg = Mockgun("https://mock.example.com", script_name="probe", api_key="x")
+    sg.require_project = False  # the create contract is tested in test_records.py
+    return sg
 
 
 def at(minute):

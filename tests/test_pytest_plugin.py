@@ -23,7 +23,7 @@ def test_make_sg_leaves_the_class_schema_paths_alone():
 
 def test_instances_share_no_records_or_schema():
     a, b = make_sg(), make_sg()
-    a.create("Shot", {"code": "a"})
+    a.create("Shot", {"code": "a", "project": a.create("Project", {"name": "p"})})
     a.schema_field_create("Shot", "text", "Notes")
     assert b.find("Shot", []) == []
     assert "sg_notes" not in b.schema_field_read("Shot")
@@ -33,6 +33,7 @@ def test_the_clock_is_deterministic():
     stamps = []
     for _ in range(2):
         sg = make_sg()
+        sg.require_project = False  # the create contract is tested in test_records.py
         sg.create("Shot", {"code": "a"})
         stamps.append([e["created_at"] for e in sg.find("EventLogEntry", [["event_type", "is", "Shotgun_Shot_New"]], ["created_at"])])
     assert stamps[0] == stamps[1]
@@ -49,7 +50,7 @@ def test_a_suite_uses_the_fixture_with_no_setup(pytester):
     pytester.makepyfile(
         """
         def test_one(sg):
-            sg.create("Shot", {"code": "a"})
+            sg.create("Shot", {"code": "a", "project": sg.create("Project", {"name": "p"})})
             assert len(sg.find("Shot", [])) == 1
 
         def test_two(sg):

@@ -170,7 +170,7 @@ class Site:
 
     def m_update(self, params):
         data, modes = wire.fields_from_wire(params.get("fields"))
-        return self.mock.update(params["type"], params["id"], self._data(params["type"], data), modes or None)[0]
+        return self.mock.update(params["type"], params["id"], self._data(params["type"], data), modes or None)
 
     def m_delete(self, params):
         return self.mock.delete(params["type"], params["id"])
@@ -179,18 +179,19 @@ class Site:
         return self.mock.revive(params["type"], params["id"])
 
     def m_batch(self, params):
-        results = []
+        requests = []
         for request in params:
             kind = request["request_type"]
-            if kind == "create":
-                results.append(self.m_create(request))
-            elif kind == "update":
-                results.append(self.m_update(request))
-            elif kind == "delete":
-                results.append(self.m_delete(request))
-            else:
-                raise ShotgunError("Invalid request type %s in request %s" % (kind, request))
-        return results
+            out = {"request_type": kind, "entity_type": request["type"]}
+            if kind in ("create", "update"):
+                data, modes = wire.fields_from_wire(request.get("fields"))
+                out["data"] = self._data(request["type"], data)
+                if modes:
+                    out["multi_entity_update_modes"] = modes
+            if kind in ("update", "delete"):
+                out["entity_id"] = request["id"]
+            requests.append(out)
+        return self.mock.batch(requests)  # atomic, api3 063
 
     def m_schema_read(self, params):
         return self.mock.schema_read()

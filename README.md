@@ -97,6 +97,22 @@ the mock cannot know has a default and a setter:
 
 `export_page` refuses every page, as a site with no exportable page does.
 
+## Records
+
+Creates, updates, batches and deletes answer as a Flow PT 8.91 site answered over api3 (`docs/api3/027`, `060` to `065`):
+
+- A create with no fields is refused. A Shot, Version, Asset, Sequence, Task, Playlist, PublishedFile, Note or Delivery create without `project` is refused.
+- An omitted identity field reads `New <Type> <id>`. An empty one is refused and spends an id. `code` is not unique.
+- A status outside `valid_values` is refused. `""` stores `None`.
+- `update` returns the row.
+- `batch` is atomic. A failing request raises a Fault naming its index, and the ids it handed out stay spent.
+- A delete nulls entity fields that link to the row and retires the Versions whose `entity` it is. A revive puts both back.
+
+Hooks:
+
+- `sg.require_project = False` lets a create skip the `project` check.
+- `sg.set_project_schema(project, entity_type, field, visible=..., hidden_values=...)` sets what `schema_field_read(..., project_entity=project)` reads.
+
 ## Bundled schema
 
 `sg_mockgun.schemas.paths()` returns a schema pulled from a Flow PT 8.91 site on 2026-11-12: 95

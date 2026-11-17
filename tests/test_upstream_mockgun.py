@@ -84,7 +84,9 @@ class TestValidateFilterSyntax(unittest.TestCase):
             "https://test.shotgunstudio.com", login="user", password="1234"
         )
 
-        self._mockgun.create("Shot", {"code": "shot"})
+        # sg-mockgun: a Shot create needs a project (api3 060).
+        project = self._mockgun.create("Project", {"name": "project"})
+        self._mockgun.create("Shot", {"code": "shot", "project": project})
 
     def test_filter_array_or_dict(self):
         """
@@ -471,15 +473,18 @@ class TestMultiEntityFieldUpdate(unittest.TestCase):
             "https://test.shotgunstudio.com", login="user", password="1234"
         )
 
-        # Create two versions to assign to the shot.
-        self._version1 = self._mockgun.create("Version", {"code": "version1"})
-        self._version2 = self._mockgun.create("Version", {"code": "version2"})
-        self._version3 = self._mockgun.create("Version", {"code": "version3"})
+        # sg-mockgun: Version and Playlist creates need a project (api3 060).
+        project = self._mockgun.create("Project", {"name": "project"})
 
-        # remove 'code' field for later comparisons
-        del self._version1["code"]
-        del self._version2["code"]
-        del self._version3["code"]
+        # Create two versions to assign to the shot.
+        self._version1 = self._mockgun.create("Version", {"code": "version1", "project": project})
+        self._version2 = self._mockgun.create("Version", {"code": "version2", "project": project})
+        self._version3 = self._mockgun.create("Version", {"code": "version3", "project": project})
+
+        # remove 'code' and 'project' fields for later comparisons
+        for version in (self._version1, self._version2, self._version3):
+            del version["code"]
+            del version["project"]
 
         # sg-mockgun: a returned link has the target's name (sg-groundtruth finding 060).
         self._version1["name"] = "version1"
@@ -489,18 +494,19 @@ class TestMultiEntityFieldUpdate(unittest.TestCase):
         # Create playlists
         self._add_playlist = self._mockgun.create(
             "Playlist",
-            {"code": "playlist1", "versions": [self._version1, self._version2]},
+            {"code": "playlist1", "project": project, "versions": [self._version1, self._version2]},
         )
         self._remove_playlist = self._mockgun.create(
             "Playlist",
             {
                 "code": "playlist1",
+                "project": project,
                 "versions": [self._version1, self._version2, self._version3],
             },
         )
         self._set_playlist = self._mockgun.create(
             "Playlist",
-            {"code": "playlist1", "versions": [self._version1, self._version2]},
+            {"code": "playlist1", "project": project, "versions": [self._version1, self._version2]},
         )
 
     def test_update_add(self):
