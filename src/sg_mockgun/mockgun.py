@@ -764,11 +764,14 @@ class Shotgun(object):
                 _events.entity_created(self._event_user["name"], entity_type, next_id, self._row_name(row), changes),
                 row, now=now,
             )
+        tasks_before = list(row.get("tasks") or [])
         _taskflow.after_create(self, entity_type, row, data)
 
         # api3 038: the fields sent, plus the return_fields asked for.
         result = dict((field, self._read_field(entity_type, row, field)) for field in data)
         result.update((field, self._read_field(entity_type, row, field)) for field in return_fields or [])
+        if "tasks" in result and "tasks" not in data:
+            result["tasks"] = tasks_before  # api3 070: the Tasks a template makes are not in the create answer
 
         result["type"] = row["type"]
         result["id"] = row["id"]

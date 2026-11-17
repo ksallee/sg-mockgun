@@ -71,6 +71,15 @@ def test_create_with_task_template_makes_tasks_and_edges(site):
     assert [d["id"] for d in by["Light"]["downstream_tasks"]] == [by["Comp"]["id"]]
 
 
+def test_entity_tasks_lists_the_generated_tasks(site):
+    # api3 070: find_one on the Shot reads one link per generated Task
+    sg, project, steps = site
+    tt, _ = live_template(sg, steps)
+    shot = sg.create("Shot", {"project": project, "code": "sh", "task_template": tt})
+    links = sg.find_one("Shot", [["id", "is", shot["id"]]], ["tasks"])["tasks"]
+    assert sorted(t["id"] for t in links) == sorted(t["id"] for t in tasks_on(sg, shot))
+
+
 def test_create_return_fields_tasks_reads_empty(site):
     sg, project, steps = site
     tt, _ = live_template(sg, steps)
