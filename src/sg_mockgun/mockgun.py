@@ -125,6 +125,7 @@ from .schema import SchemaFactory
 from . import events as _events
 from . import seed as _seed
 from . import writes as _writes
+from .filters import IGNORED, filter_refusal, jsonb_contains
 from .fields import CREATABLE_TYPES, UPDATABLE_PROPERTIES, field_code, new_field, ruby_inspect, ruby_list, ruby_params
 
 def _same_link(a, b):
@@ -876,7 +877,8 @@ class Shotgun(object):
         :rtype: bool
         """
         # A list of scalar values comes from a dotted path through a multi_entity field.
-        if isinstance(lval, list) and field_type != "multi_entity":
+        # A jsonb array is one value.
+        if isinstance(lval, list) and field_type not in ("multi_entity", "jsonb"):
             # No linked row of the named type matches no operator. Unmeasured: finding 016's
             # is_not null sample may have had every row linked (sg-groundtruth#109).
             if not lval:
@@ -889,22 +891,45 @@ class Shotgun(object):
                 return lval == rval
             elif operator == "is_not":
                 return lval != rval
-        elif field_type in ("float", "number", "date", "date_time"):
+        elif field_type in ("float", "number", "percent", "duration", "timecode", "date", "date_time"):
+            is_date = field_type in ("date", "date_time")
+            if is_date and operator in ("in", "not_in") and not isinstance(rval, list):
+                rval = [rval]
             if operator == "is":
                 return lval == rval
             elif operator == "is_not":
                 return lval != rval
+            # Comparisons exclude null rows; negations include them (field_types/number, field_types/date).
             elif operator == "less_than":
-                return lval < rval
+                return lval is not None and rval is not None and lval < rval
             elif operator == "greater_than":
-                return lval > rval
+                return lval is not None and rval is not None and lval > rval
             elif operator == "between":
-                return lval >= rval[0] and lval <= rval[1]
-            elif operator == "not_between":
-                return lval < rval[0] or lval > rval[1]
+                low, high = rval
+                if lval is None or low is None or high is None:
+                    return False
+                # A date range is order-insensitive (field_types/date).
+                if is_date and low > high:
+                    low, high = high, low
+                return low <= lval <= high
             elif operator == "in":
                 return lval in rval
-        elif field_type in ("list", "status_list"):
+            elif operator == "not_in":
+                return lval not in rval
+        elif field_type in ("list", "status_list", "entity_type", "color", "uuid"):
+            # A bare scalar stands for a one-element list, and "" for None (field_types/list, field_types/uuid).
+            if operator in ("in", "not_in"):
+                rval = rval if isinstance(rval, list) else [rval]
+                rval = [None if val == "" else val for val in rval]
+            elif rval == "":
+                rval = None
+            # List and status_list match case-insensitively, as text does (field_types/list).
+            if field_type in ("list", "status_list"):
+                lval = lval.lower() if isinstance(lval, str) else lval
+                if isinstance(rval, list):
+                    rval = [val.lower() if isinstance(val, str) else val for val in rval]
+                elif isinstance(rval, str):
+                    rval = rval.lower()
             if operator == "is":
                 return lval == rval
             elif operator == "is_not":
@@ -913,9 +938,20 @@ class Shotgun(object):
                 return lval in rval
             elif operator == "not_in":
                 return lval not in rval
-        elif field_type == "entity_type":
+        elif field_type == "image":
             if operator == "is":
                 return lval == rval
+            elif operator == "is_not":
+                return lval != rval
+        elif field_type == "jsonb":
+            if operator == "is":
+                return lval == rval
+            elif operator == "is_not":
+                return lval != rval
+            elif operator == "contains":
+                return jsonb_contains(lval, rval)
+            elif operator == "not_contains":
+                return not jsonb_contains(lval, rval)
         elif field_type == "text":
             # Some operations expect a list but can deal with a single value
             if operator in ("in", "not_in") and not isinstance(rval, list):
@@ -1023,7 +1059,7 @@ class Shotgun(object):
             elif operator == "name_contains":
                 return any(rval in _link_name(sub_lval) for sub_lval in lval)
 
-        raise ShotgunError("The %s operator is not supported on the %s type" % (operator, field_type))
+        raise ShotgunError("mockgun does not implement the '%s' relation on the '%s' data type" % (operator, field_type))
 
     def _get_field_from_row(self, entity_type, row, field):
         # split dotted form fields
@@ -1118,6 +1154,8 @@ class Shotgun(object):
             elif field_type == "multi_entity" and operator.startswith("name_") and isinstance(lval, list):
                 lval = [self._named_link(link) for link in lval]
 
+            if self._filter_ignored(entity_type, field, field_type, operator, rval):
+                return True
             return self._compare(field_type, lval, operator, rval)
 
     def _named_link(self, link):
@@ -1129,6 +1167,16 @@ class Shotgun(object):
         elif "code" in linked_row:
             link["name"] = linked_row["code"]
         return link
+
+    def _filter_ignored(self, entity_type, field, field_type, operator, rval):
+        """Raise the site's refusal of a filter, or say whether the site ignores it and returns every row."""
+        while field.count(".") >= 2:
+            _, entity_type, field = field.split(".", 2)
+        refusal = filter_refusal(entity_type, field, field_type, operator, rval)
+        if refusal:
+            # REST wording; api3 unprobed (sg-groundtruth#109)
+            raise ShotgunError(refusal)
+        return (entity_type, field) in IGNORED
 
     def _rearrange_filters(self, filters: list) -> None:
         """
