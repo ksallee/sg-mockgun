@@ -132,6 +132,7 @@ from . import events as _events
 from . import media as _media
 from . import seed as _seed
 from . import writes as _writes
+from . import reads as _reads
 import shotgun_api3.shotgun as _api3
 from .filters import (
     CALENDAR, IGNORED, RELATIVE, calculated_type, client_index_error, filter_refusal, filter_values,
@@ -431,10 +432,21 @@ class Shotgun(object):
             raise ValueError("limit parameter must be a positive integer")
         if not isinstance(page, int) or page < 0:
             raise ValueError("page parameter must be a positive integer")
-        if additional_filter_presets:
-            raise ShotgunError(
-                "additional_filter_presets is not modelled by sg-mockgun (sg-mockgun#39)."
-            )
+        # api3 024: the client copies `column` into `field_name` and fills `direction` with "asc".
+        sorts = []
+        for sort in order or []:
+            sort = dict(sort)
+            if "column" in sort:
+                sort["field_name"] = sort["column"]
+            sort.setdefault("direction", "asc")
+            sorts.append({"field_name": sort["field_name"], "direction": sort["direction"]})
+
+        # api3 020: the page size comes from server_info, and limit shrinks it.
+        server_info = getattr(self, "server_info", None)
+        page_size = _reads.page_size(server_info if isinstance(server_info, dict) else None)
+        if limit and limit <= page_size:
+            page_size = limit
+            page = page or 1
 
         self.finds += 1
 
@@ -470,6 +482,18 @@ class Shotgun(object):
         # api3 013: validated before the scan.
         self._validate_filters(entity_type, resolved_filters)
 
+        for sort in sorts:
+            if sort["direction"] not in ("asc", "desc"):
+                # api3 024
+                raise Fault("API read() invalid/missing string 'direction':\n%s" % ruby_inspect(sort))
+
+        if additional_filter_presets:
+            params = _reads.read_params(
+                entity_type, filters, filter_operator, list(fields) if fields else None, retired_only,
+                page_size, page or 1, page == 0, additional_filter_presets, include_archived_projects,
+            )
+            latest_by = self._check_presets(entity_type, additional_filter_presets, params)
+
         results = [
             # Apply the filters for every single entities for the given entity type.
             row for row in self._db[entity_type].values()
@@ -479,67 +503,32 @@ class Shotgun(object):
         ]
 
         if not include_archived_projects:
-            # documented, unprobed (sg-mockgun#39)
-            results = [row for row in results if not self._in_archived_project(row)]
+            # api3 022: rows in an archived project, and archived Project rows, drop out.
+            results = [
+                row for row in results
+                if not self._in_archived_project(row) and not (entity_type == "Project" and row.get("archived"))
+            ]
+
+        if additional_filter_presets:
+            keep = self._latest_ids(entity_type, latest_by, retired_only)
+            results = [row for row in results if row["id"] in keep]
 
         # finding 026: id ascending is the default order and the last tiebreak.
         results = sorted(results, key=lambda row: row["id"])
 
-        if order:
-            # order: [{"field_name": "code", "direction": "asc"}, ... ]
-            def sort_none(k, order_field, field_type):
-                """
-                Handle sorting of None consistently.
-                Note: Doesn't handle [checkbox, serializable, url].
-                """
-                value = self._get_field_from_row(entity_type, k, order_field)
-                if value is not None:
-                    return value
-                elif field_type in ("number", "percent", "duration"):
-                    return 0
-                elif field_type == "float":
-                    return 0.0
-                elif field_type in ("text", "entity_type", "date", "list", "status_list"):
-                    return ""
-                elif field_type == "date_time":
-                    return datetime.datetime(datetime.MINYEAR, 1, 1)
-                return None
+        keys = []
+        for sort in sorts:
+            # finding 026, api3 024: a summary, url or unknown field is ignored.
+            try:
+                field_type = self._get_field_type(entity_type, sort["field_name"])
+            except (KeyError, ShotgunError):
+                continue
+            if field_type in ("summary", "url"):
+                continue
+            keys.append((sort["field_name"], sort["direction"] == "desc"))
+        if keys:
+            results = _reads.sort_rows(results, keys, lambda row, f: self._sort_value(entity_type, row, f))
 
-            keys = []
-            for order_entry in order:
-                if "field_name" not in order_entry:
-                    raise ValueError("Order clauses must be list of dicts with keys 'field_name' and 'direction'!")
-
-                order_field = order_entry["field_name"]
-                if order_entry["direction"] == "asc":
-                    desc_order = False
-                elif order_entry["direction"] == "desc":
-                    desc_order = True
-                else:
-                    raise ValueError("Unknown ordering direction")
-
-                # finding 026: a summary, url or unknown field is ignored.
-                try:
-                    field_type = self._get_field_type(entity_type, order_field)
-                except KeyError:
-                    continue
-                if field_type in ("summary", "url"):
-                    continue
-                keys.append((order_field, field_type, desc_order))
-
-            # finding 026: the first key is primary. Stable sorts run from the last key to the first.
-            for order_field, field_type, desc_order in reversed(keys):
-                results = sorted(
-                    results,
-                    key=lambda k: sort_none(k, order_field, field_type),
-                    reverse=desc_order,
-                )
-
-        # finding 082: a page has 500 rows unless limit is smaller.
-        page_size = 500
-        if limit and limit <= page_size:
-            page_size = limit
-            page = page or 1
         if page:
             results = results[(page - 1) * page_size:page * page_size]
         elif limit:
@@ -566,6 +555,60 @@ class Shotgun(object):
             additional_filter_presets=additional_filter_presets,
         )
         return results[0] if results else None
+
+    def _check_presets(self, entity_type, presets, params):
+        """Raise the site's Fault for a preset it refuses; return the LATEST latest_by value (api3 023)."""
+        latest_by = None
+        for preset in presets:
+            if not isinstance(preset, dict):
+                raise Fault("API read() invalid additional filter preset format. It must be a hash:\n%s"
+                            % _reads.pp(params))
+            if preset.get("preset_name") != "LATEST" or entity_type not in _reads.LATEST_BY:
+                raise Fault("API read() Invalid additional filter preset provided: \n%s" % _reads.pp(params))
+            if preset.get("latest_by") not in _reads.LATEST_BY[entity_type]:
+                raise Fault("API read() CRUD ERROR #10: Read failed for entity type [%s]" % entity_type)
+            latest_by = preset["latest_by"]
+        return latest_by
+
+    def _latest_ids(self, entity_type, latest_by, retired_only):
+        """Ids LATEST keeps among the rows of one retirement state (api3 023)."""
+        def link_key(value):
+            return (value["type"], value["id"]) if isinstance(value, dict) else value
+
+        if entity_type == "PublishedFile":
+            def group(row):
+                return tuple(link_key(row.get(f)) for f in _reads.PUBLISHED_FILE_GROUP)
+        else:
+            def group(row):
+                return (link_key(row.get("entity")),)
+
+        def rank(row):
+            if latest_by != "BY_PIPELINE_STEP_NUMBER_AND_ENTITIES_CREATED_AT":
+                return ()
+            task = self._db["Task"].get((row.get("sg_task") or {}).get("id"), {})
+            step = self._db["Step"].get((task.get("step") or {}).get("id"), {})
+            order = step.get("list_order")
+            return (-1 if order is None else order,)
+
+        rows = [row for row in self._db[entity_type].values() if row["__retired"] == bool(retired_only)]
+        return _reads.latest_ids(rows, group, rank)
+
+    def _sort_value(self, entity_type, row, field):
+        """The value a sort compares for one field of a row (api3 024, api3 025)."""
+        value = self._get_field_from_row(entity_type, row, field)
+        if value is None:
+            return None
+        field_type = self._get_field_type(entity_type, field)
+        if field_type == "status_list" and "." not in field:
+            valid = self._schema[entity_type][field]["properties"].get("valid_values", {}).get("value") or []
+            return valid.index(value) if value in valid else len(valid)
+        if field_type == "entity" and isinstance(value, dict):
+            link = self._live_link(value)
+            return link["name"] if link else None
+        if field_type == "multi_entity" and isinstance(value, list):
+            # multi_entity sort order unprobed (sg-mockgun#39)
+            return tuple(link["name"] or "" for link in map(self._live_link, value) if link) or None
+        return value
 
     def _in_archived_project(self, row):
         """Return True when the row's project links a Project whose archived is True."""
@@ -1538,8 +1581,23 @@ class Shotgun(object):
         if field_type not in ("entity", "multi_entity"):
             return value
         if isinstance(value, list):
-            return [self._named_link(item) for item in value]
-        return self._named_link(value)
+            links = [self._live_link(item) for item in value]
+            links = [link for link in links if link is not None]
+            if entity_type == "Note" and field == "tasks":
+                # api3 026: Note.tasks elements add the Task's template_task id.
+                for link in links:
+                    task = self._db["Task"].get(link["id"], {})
+                    link["template_task_id"] = (task.get("template_task") or {}).get("id")
+            return links
+        return self._live_link(value)
+
+    def _live_link(self, link):
+        """A named link, or None when its target is retired (api3 027)."""
+        if isinstance(link, dict) and "type" in link and "id" in link:
+            target = self._db.get(link["type"], {}).get(link["id"])
+            if target is not None and target.get("__retired"):
+                return None
+        return self._named_link(link)
 
     def _named_link(self, link):
         """Return an entity link as {type, id, name}, where name is the target's cached_display_name."""

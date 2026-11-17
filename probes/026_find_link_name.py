@@ -76,3 +76,13 @@ for target, entity_type, field in LINKS:
         "example name": links[0].get("name"),
     }
 _lib.emit("026_find_link_name", answers, env, sg)
+
+# template_task_id in Note.tasks against the Task's template_task.
+pairs = [(t["id"], t.get("template_task_id"))
+         for r in sg.find("Note", [["tasks", "type_is", "Task"]], ["tasks"], limit=50) for t in r["tasks"]]
+tasks = {t["id"]: t for t in sg.find("Task", [["id", "in", [p[0] for p in pairs]]], ["template_task"])}
+_lib.emit("026 template_task_id", {
+    "elements": len(pairs),
+    "template_task_id == Task.template_task.id": sum(
+        1 for i, v in pairs if (tasks[i]["template_task"] or {}).get("id") == v),
+}, env)
