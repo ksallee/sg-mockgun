@@ -116,6 +116,7 @@ Below is a non-exhaustive list of things that we still need to implement:
 
 import copy
 import datetime
+import importlib.metadata
 import os
 import urllib.parse
 import urllib.request
@@ -164,7 +165,11 @@ _RETIRED_FIELD = (
 
 # ----------------------------------------------------------------------------
 # Version
-__version__ = "0.0.1"
+try:
+    __version__ = importlib.metadata.version("sg-mockgun")
+except importlib.metadata.PackageNotFoundError:
+    # Imported from a source tree that was never installed.
+    __version__ = "0.0.0"
 
 
 # ----------------------------------------------------------------------------
