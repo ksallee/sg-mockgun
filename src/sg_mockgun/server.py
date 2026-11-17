@@ -26,7 +26,6 @@ from . import attention, wire
 from .mockgun import FieldReviveError, Shotgun
 from . import schemas
 
-SERVER_VERSION = [8, 91, 0]  # the site the bundled schema and the recorded answers come from
 
 
 class Site:
@@ -112,8 +111,31 @@ class Site:
                 return e.status, rest_error(e.status, str(e))
         return 204, None
 
+    # summarize, text_search, info (api3 040 to 046)
+
     def m_info(self, params):
-        return {"version": SERVER_VERSION, "s3_uploads_enabled": False, "totango_site_id": None}
+        # api3 046: answered without credentials. Site.call checks none.
+        return self.mock.info()
+
+    def m_summarize(self, params):
+        entity_type = params["type"]
+        filters = params.get("filters")
+        operator = None
+        if isinstance(filters, dict) and "logical_operator" in filters:
+            filters, operator = wire.filters_from_wire(filters)
+            filters = self._typed_filters(filters, self.mock._schema.get(entity_type, {}))
+        return self.mock.summarize(entity_type, filters, params.get("summaries"), filter_operator=operator,
+                                   grouping=params.get("grouping"),
+                                   include_archived_projects=params.get("include_archived_projects", True))
+
+    def m_query_display_name_cache(self, params):
+        entity_types = {}
+        for entity_type, node in (params.get("entity_types") or {}).items():
+            filters, operator = wire.filters_from_wire(node)
+            filters = self._typed_filters(filters, self.mock._schema.get(entity_type, {}))
+            entity_types[entity_type] = [{"filter_operator": operator, "filters": filters}] if operator == "any" else filters
+        return self.mock.text_search(params.get("text"), entity_types, project_ids=params.get("project_ids"),
+                                     limit=params.get("max_results"))
 
     def m_read(self, params):
         filters, operator = wire.filters_from_wire(params.get("filters") or {"conditions": []})

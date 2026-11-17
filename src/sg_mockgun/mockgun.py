@@ -124,6 +124,8 @@ from typing import Any
 
 from shotgun_api3 import Fault, ShotgunError, ShotgunFileDownloadError, ShotgunThumbnailNotReady
 from shotgun_api3.shotgun import _Config
+from shotgun_api3 import Fault, ShotgunError
+from shotgun_api3.shotgun import ServerCapabilities, _Config, _translate_filters
 from .errors import MockgunError
 from .display import display_name
 from .schema import SchemaFactory
@@ -135,12 +137,18 @@ from . import scheduling as _scheduling
 from . import taskflow as _taskflow
 from . import writes as _writes
 from . import reads as _reads
+from . import summarize as _summarize
+from . import text_search as _text_search
+from .site_info import DEFAULT_INFO
+from . import wire as _wire
 import shotgun_api3.shotgun as _api3
 from .filters import (
-    CALENDAR, IGNORED, RELATIVE, calculated_type, client_index_error, filter_refusal, filter_values,
+    CALENDAR, IGNORED, RELATIONS, RELATIVE, calculated_type, client_index_error, filter_refusal, filter_values,
     jsonb_contains, relative_match, unknown_field,
 )
 from .fields import CREATABLE_TYPES, UPDATABLE_PROPERTIES, field_code, new_field, ruby_inspect, ruby_list, ruby_params
+
+_ALL_RELATIONS = set(r for relations in RELATIONS.values() for r in relations)
 
 def _utc_now():
     """The current time in UTC."""
@@ -286,6 +294,7 @@ class Shotgun(object):
         self.create("EventLogEntry", data)
 
         self.finds = 0
+        self._info = copy.deepcopy(DEFAULT_INFO)
 
     ###################################################################################################
     # public API methods
@@ -1665,6 +1674,129 @@ class Shotgun(object):
     def _validate_entity_exists(self, entity_type, entity_id):
         if entity_id not in self._db[entity_type]:
             raise ShotgunError("No entity of type %s exists with id %s" % (entity_type, entity_id))
+
+    ###################################################################################################
+    # summarize, text_search, info (sg_mockgun.summarize, sg_mockgun.text_search, sg_mockgun.site_info)
+
+    def summarize(self, entity_type, filters, summary_fields, filter_operator=None, grouping=None,
+                  include_archived_projects=True):
+        """Summarize the rows ``filters`` selects, optionally grouped (api3 040 to 042)."""
+        # Client-side checks and translation follow shotgun_api3.Shotgun.summarize.
+        if not isinstance(grouping, list) and grouping is not None:
+            raise ValueError("summarize() 'grouping' parameter must be a list or None")
+        if isinstance(filters, (list, tuple)):
+            filters = _translate_filters(filters, filter_operator)
+        params = {"type": entity_type, "summaries": summary_fields, "filters": filters}
+        if include_archived_projects is False:
+            params["include_archived_projects"] = False
+        if grouping is not None:
+            params["grouping"] = grouping
+        field_type = lambda field: self._field_type_or_none(entity_type, field)  # noqa: E731
+        _summarize.check_request(entity_type, params, self._schema, field_type)
+        python_filters, operator = _wire.filters_from_wire(filters)
+        fields = [s["field"] for s in summary_fields] + [g["field"] for g in grouping or []]
+        rows = self.find(entity_type, python_filters, fields, filter_operator=operator,
+                         include_archived_projects=include_archived_projects)
+        return _summarize.summarize(rows, summary_fields, grouping, field_type, self._status_order(entity_type))
+
+    def text_search(self, text, entity_types, project_ids=None, limit=None):
+        """Search the names of rows of ``entity_types`` for every word of ``text`` (api3 043 to 045)."""
+        # Client-side checks and translation follow shotgun_api3.Shotgun.text_search.
+        if not isinstance(entity_types, dict):
+            raise ValueError("entity_types parameter must be a dictionary")
+        api_entity_types = {}
+        for entity_type, filter_list in entity_types.items():
+            if not isinstance(filter_list, (list, tuple)):
+                raise ValueError("value of entity_types['%s'] must be a list or tuple." % entity_type)
+            api_entity_types[entity_type] = _translate_filters(filter_list, filter_operator=None)
+        params = {"text": text, "entity_types": api_entity_types, "project_ids": project_ids or [],
+                  "max_results": limit}
+        _text_search.check_request(params, self._schema)
+        _text_search.row_limit(limit)
+        # api3 045: no entity type searches every type.
+        searched = api_entity_types or dict((t, {"logical_operator": "and", "conditions": []}) for t in self._db)
+        rows = []
+        for entity_type, node in searched.items():
+            node = self._searchable_conditions(entity_type, node)
+            python_filters, operator = _wire.filters_from_wire(node)
+            for found in self.find(entity_type, python_filters, filter_operator=operator):
+                match = self._search_match(entity_type, self._db[entity_type][found["id"]])
+                if match["name"] is None:
+                    continue  # unprobed: a row with no display name, an EventLogEntry, is not searched
+                if not params["project_ids"] or match["project_id"] in params["project_ids"]:
+                    rows.append(match)
+        return _text_search.search(text, rows, limit)
+
+    def info(self):
+        """The site's API metadata. It needs no credentials (api3 046)."""
+        return copy.deepcopy(self._info)
+
+    def set_info(self, **values):
+        """Change keys of the payload ``info()`` answers, e.g. ``set_info(version=[8, 92, 0])``."""
+        self._info.update(copy.deepcopy(values))
+
+    def connect(self):
+        """Do what the client's connect does: read ``info()``, return None (api3 046)."""
+        self.info()
+
+    def close(self):
+        """Do what the client's close does when no connection is open: nothing."""
+
+    @property
+    def server_info(self):
+        """The ``info()`` payload."""
+        return self.server_caps.server_info
+
+    @property
+    def server_caps(self):
+        """The client's ``ServerCapabilities`` built from ``info()``, as ``shotgun_api3`` builds it."""
+        return ServerCapabilities(self.config.server, self.info())
+
+    def _field_type_or_none(self, entity_type, field):
+        if not isinstance(field, str):
+            return None
+        try:
+            return self._get_field_type(entity_type, field)
+        except (KeyError, ShotgunError):
+            return None
+
+    def _status_order(self, entity_type):
+        def order(field):
+            try:
+                return list(self._schema[entity_type][field]["properties"]["valid_values"]["value"])
+            except KeyError:
+                return []
+        return order
+
+    def _searchable_conditions(self, entity_type, node):
+        """Drop conditions on fields the type lacks, and refuse a relation no data type has (api3 045)."""
+        kept = []
+        for condition in node.get("conditions", []):
+            if "conditions" in condition:
+                kept.append(self._searchable_conditions(entity_type, condition))
+                continue
+            if self._field_type_or_none(entity_type, condition["path"]) is None:
+                continue
+            if condition["relation"] not in _ALL_RELATIONS:
+                raise Fault("Uncaught exception! No condition node type matches <%s> for column %s a.%s"
+                            % (condition["relation"], entity_type, condition["path"]))
+            kept.append(condition)
+        return dict(node, conditions=kept)
+
+    def _search_match(self, entity_type, row):
+        """One row as ``text_search`` returns it (api3 043)."""
+        link = row.get("entity")
+        links = ["", ""]
+        if isinstance(link, dict) and link.get("type") in self._db:
+            target = self._db[link["type"]].get(link["id"])
+            if target is not None:
+                links = [link["type"], display_name(link["type"], target) or ""]
+        project = row.get("project")
+        return {
+            "id": row["id"], "type": entity_type, "name": display_name(entity_type, row),
+            "project_id": project.get("id") if isinstance(project, dict) else None,
+            "links": links, "status": row.get("sg_status_list"), "image": row.get("image"),
+        }
 
     ###################################################################################################
     # seeding and snapshots (sg_mockgun.seed)
