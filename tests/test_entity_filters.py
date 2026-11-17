@@ -171,3 +171,66 @@ def test_multi_entity_refuses_bare_contains(playlists):
     sg = playlists[0]
     with pytest.raises(ShotgunError, match="contains"):
         sg.find("Version", [["playlists", "contains", "zz"]])
+
+
+# finding 060: name operators compare the name `find` returns in the link.
+
+
+def test_entity_name_is_compares_the_display_name(sg):
+    task = sg.create("Task", {"content": "comp"})
+    sg.create("Version", {"code": "v1", "sg_task": task})
+    named = sg.find("Version", [["sg_task", "name_is", "comp"]], ["sg_task"])
+    assert [row["sg_task"]["name"] for row in named] == ["comp"]
+
+
+def test_multi_entity_name_is_compares_the_display_name(sg):
+    task = sg.create("Task", {"content": "comp"})
+    sg.create("Version", {"code": "v1", "tasks": [task]})
+    assert codes(sg, "Version", [["tasks", "name_contains", "com"]]) == ["v1"]
+
+
+# field_types/entity, field_types/multi_entity: the site's `Valid relations` list.
+
+_LINK_RELATIONS = (
+    '\\["is", "is_not", "name_contains", "name_not_contains", "name_is", "type_is", "type_is_not", '
+    '"in", "not_in"\\]'
+)
+
+
+def test_entity_unknown_operator_names_the_valid_relations(sg):
+    pattern = "Version.entity's 'entity' data type doesn't support 'starts_with' 'relation'. Valid relations: "
+    with pytest.raises(ShotgunError, match=pattern + _LINK_RELATIONS):
+        sg.find("Version", [["entity", "starts_with", "sh"]])
+
+
+def test_multi_entity_bare_contains_names_the_type_and_field(sg):
+    pattern = "Version.playlists's 'multi_entity' data type doesn't support 'contains' 'relation'. Valid relations: "
+    with pytest.raises(ShotgunError, match=pattern + _LINK_RELATIONS):
+        sg.find("Version", [["playlists", "contains", "zz"]])
+
+
+# Refusals are raised before the scan; empty-table case unprobed (sg-mockgun#39).
+
+
+@pytest.mark.parametrize("sg_filter", [
+    ["entity", "starts_with", "sh"],
+    ["sg_uploaded_movie", "is", None],
+    ["entity.Shot.no_such_field", "is", "x"],
+    ["playlists", "in", []],
+    ["playlists", "is", [{"type": "Playlist", "id": 1}, {"type": "Playlist", "id": 2}]],
+    ["entity", "name_is", None],
+])
+def test_refusals_raise_on_an_empty_table(sg, sg_filter):
+    with pytest.raises(ShotgunError):
+        sg.find("Version", [sg_filter])
+
+
+def test_refusals_raise_inside_a_nested_group_on_an_empty_table(sg):
+    nested = {"filter_operator": "any", "filters": [["code", "is", "x"], ["playlists", "in", []]]}
+    with pytest.raises(ShotgunError):
+        sg.find("Version", [nested])
+
+
+def test_entity_in_empty_list_still_matches_nothing(versions):
+    # entity `in []` unmeasured (sg-mockgun#39)
+    assert codes(versions[0], "Version", [["entity", "in", []]]) == []
