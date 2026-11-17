@@ -481,6 +481,11 @@ class TestMultiEntityFieldUpdate(unittest.TestCase):
         del self._version2["code"]
         del self._version3["code"]
 
+        # sg-mockgun: a returned link has the target's name (sg-groundtruth finding 060).
+        self._version1["name"] = "version1"
+        self._version2["name"] = "version2"
+        self._version3["name"] = "version3"
+
         # Create playlists
         self._add_playlist = self._mockgun.create(
             "Playlist",

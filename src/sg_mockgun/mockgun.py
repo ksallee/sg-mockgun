@@ -121,6 +121,7 @@ from typing import Any
 from shotgun_api3 import Fault, ShotgunError
 from shotgun_api3.shotgun import _Config
 from .errors import MockgunError
+from .display import display_name
 from .schema import SchemaFactory
 from . import events as _events
 from . import seed as _seed
@@ -527,7 +528,7 @@ class Shotgun(object):
             fields = set(fields) | set(["type", "id"])
 
         # get the values requested
-        val = [dict((field, self._get_field_from_row(entity_type, row, field)) for field in fields) for row in results]
+        val = [dict((field, self._read_field(entity_type, row, field)) for field in fields) for row in results]
 
         return val
 
@@ -617,9 +618,9 @@ class Shotgun(object):
             )
 
         if return_fields is None:
-            result = dict((field, self._get_field_from_row(entity_type, row, field)) for field in data)
+            result = dict((field, self._read_field(entity_type, row, field)) for field in data)
         else:
-            result = dict((field, self._get_field_from_row(entity_type, row, field)) for field in return_fields)
+            result = dict((field, self._read_field(entity_type, row, field)) for field in return_fields)
 
         result["type"] = row["type"]
         result["id"] = row["id"]
@@ -644,7 +645,10 @@ class Shotgun(object):
                         before[field], row.get(field))]
             self._log(rows, row)
 
-        return [dict((field, item) for field, item in row.items() if field in data or field in ("type", "id"))]
+        result = dict((field, self._read_field(entity_type, row, field)) for field in data)
+        result["type"] = row["type"]
+        result["id"] = row["id"]
+        return [result]
 
     def delete(self, entity_type, entity_id):
         self._validate_entity_type(entity_type)
@@ -846,22 +850,31 @@ class Shotgun(object):
                         raise ShotgunError("%s is not a valid field for entity %s" % (field, entity_type))
 
     def _get_default_value(self, entity_type, field):
+        """Return the value a new row reads for this field."""
         field_info = self._schema[entity_type][field]
-        if field_info["data_type"]["value"] == "multi_entity":
-            default_value = []
-        else:
-            default_value = field_info["properties"]["default_value"]["value"]
+        field_type = field_info["data_type"]["value"]
+        default_value = field_info["properties"]["default_value"]["value"]
+        if field_type == "multi_entity":
+            return []  # field_types/multi_entity
+        if field_type == "checkbox":
+            return bool(default_value)  # field_types/checkbox: never None
+        if field_type == "password":
+            return "*******"  # field_types/password
+        if field_type == "pivot_column":
+            return None  # field_types/pivot_column
+        if field_type in ("text", "date") and default_value == "":
+            return None  # field_types/text, field_types/date
+        if field_type in ("number", "percent", "duration", "timecode") and isinstance(default_value, str):
+            # entity_types/Playlist: a "0" default reads 0.
+            return int(default_value) if default_value else None
+        if field_type == "float" and isinstance(default_value, str):
+            return float(default_value) if default_value else None
         return default_value
 
     def _get_new_row(self, entity_type):
         row = {"type": entity_type, "__retired": False}
         for field in self._schema[entity_type]:
-            field_info = self._schema[entity_type][field]
-            if field_info["data_type"]["value"] == "multi_entity":
-                default_value = []
-            else:
-                default_value = field_info["properties"]["default_value"]["value"]
-            row[field] = default_value
+            row[field] = self._get_default_value(entity_type, field)
         return row
 
     def _compare(self, field_type: str, lval: Any, operator: str, rval: Any) -> bool:
@@ -1262,8 +1275,33 @@ class Shotgun(object):
                     ]
                 elif update_mode == "set":
                     row[field] = [{"type": item["type"], "id": item["id"]} for item in data[field]]
+            elif field_type == "text" and isinstance(data[field], str):
+                # field_types/text: both ends stripped, and an empty string is stored as None.
+                row[field] = data[field].strip() or None
             else:
                 row[field] = data[field]
+
+    def _read_field(self, entity_type, row, field):
+        """Return a field as a site returns it, with entity links named (finding 060)."""
+        value = self._get_field_from_row(entity_type, row, field)
+        try:
+            field_type = self._get_field_type(entity_type, field)
+        except KeyError:
+            return value
+        if field_type not in ("entity", "multi_entity"):
+            return value
+        if isinstance(value, list):
+            return [self._named_link(item) for item in value]
+        return self._named_link(value)
+
+    def _named_link(self, link):
+        """Return an entity link as {type, id, name}, where name is the target's cached_display_name."""
+        if not isinstance(link, dict) or "type" not in link or "id" not in link:
+            # A dotted path through a multi_entity returns nested lists.
+            return [self._named_link(item) for item in link] if isinstance(link, list) else link
+        target = self._db.get(link["type"], {}).get(link["id"])
+        name = display_name(link["type"], target) if target is not None else link.get("name")
+        return {"type": link["type"], "id": link["id"], "name": name}
 
     def _validate_entity_exists(self, entity_type, entity_id):
         if entity_id not in self._db[entity_type]:
