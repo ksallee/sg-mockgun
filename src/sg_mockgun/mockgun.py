@@ -124,6 +124,7 @@ from .errors import MockgunError
 from .schema import SchemaFactory
 from . import events as _events
 from . import seed as _seed
+from . import writes as _writes
 from .fields import CREATABLE_TYPES, UPDATABLE_PROPERTIES, field_code, new_field, ruby_inspect, ruby_list, ruby_params
 
 def _same_link(a, b):
@@ -588,7 +589,7 @@ class Shotgun(object):
                     data[d]["local_path_mac"] = data[d]["local_path"]
 
         self._validate_entity_type(entity_type)
-        self._validate_entity_data(entity_type, data)
+        data = self._validate_entity_data(entity_type, data, "create")
         self._validate_entity_fields(entity_type, return_fields)
         try:
             # get next id in this table
@@ -626,7 +627,7 @@ class Shotgun(object):
 
     def update(self, entity_type, entity_id, data, multi_entity_update_modes=None):
         self._validate_entity_type(entity_type)
-        self._validate_entity_data(entity_type, data)
+        data = self._validate_entity_data(entity_type, data)
         self._validate_entity_exists(entity_type, entity_id)
 
         row = self._db[entity_type][entity_id]
@@ -740,19 +741,23 @@ class Shotgun(object):
         if entity_type not in self._schema:
             raise ShotgunError("%s is not a valid entity" % entity_type)
 
-    def _validate_entity_data(self, entity_type, data):
+    def _validate_entity_data(self, entity_type, data, verb="update"):
+        """Raise ShotgunError on a value the site refuses; return data with each value as stored."""
         if "id" in data or "type" in data:
             raise ShotgunError("Can't set id or type on create or update")
 
         self._validate_entity_fields(entity_type, data.keys())
 
+        stored = dict(data)
         for field, item in data.items():
-
-            if item is None:
-                # none is always ok
+            if item is None and field not in self._schema[entity_type]:
                 continue
-
             field_info = self._schema[entity_type][field]
+            sg_type = field_info["data_type"]["value"]
+            item = stored[field] = _writes.check_value(verb, entity_type, field, sg_type, item)
+
+            if item is None or (sg_type in _writes.RULES and sg_type != "multi_entity"):
+                continue
 
             if field_info["data_type"]["value"] == "multi_entity":
                 if not isinstance(item, list):
@@ -824,6 +829,8 @@ class Shotgun(object):
                     )
 
                 # TODO: add check for correct timezone
+
+        return stored
 
     def _validate_entity_fields(self, entity_type, fields):
         self._validate_entity_type(entity_type)
