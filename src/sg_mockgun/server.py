@@ -244,17 +244,29 @@ def make_server(mock, host="127.0.0.1", port=8080):
     return server
 
 
-def main(argv=None):
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(prog="sg-mockgun")
     sub = parser.add_subparsers(dest="command", required=True)
     serve = sub.add_parser("serve", help="serve a mock site over the api3 JSON protocol")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8080)
     serve.add_argument("--schema", default="fpt_8_91", help="a bundled schema name")
-    args = parser.parse_args(argv)
-    Shotgun.set_schema_paths(*schemas.paths(args.schema))
+    serve.add_argument("--seed", help="a JSON seed file of records to load, see sg_mockgun.seed")
+    return parser.parse_args(argv)
+
+
+def build_mock(schema, seed=None):
+    """A mockgun instance on a bundled schema, loaded with the records in ``seed`` when given."""
+    Shotgun.set_schema_paths(*schemas.paths(schema))
     mock = Shotgun("https://mock.example.com", script_name="mockgun", api_key="mockgun")
-    server = make_server(mock, args.host, args.port)
+    if seed:
+        mock.load(seed)
+    return mock
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    server = make_server(build_mock(args.schema, args.seed), args.host, args.port)
     print("serving api3 on http://%s:%d" % server.server_address[:2], flush=True)
     server.serve_forever()
 

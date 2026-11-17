@@ -1,0 +1,14 @@
+{
+  "Project": [
+    {"id": 70, "name": "Demo"}
+  ],
+  "Sequence": [
+    {"id": 5, "code": "sq010", "project": {"type": "Project", "id": 70}}
+  ],
+  "Shot": [
+    {"id": 1001, "code": "sh010", "project": {"type": "Project", "id": 70},
+     "sg_sequence": {"type": "Sequence", "id": 5}, "sg_cut_in": 1001},
+    {"id": 1002, "code": "sh020", "project": {"type": "Project", "id": 70},
+     "sg_sequence": {"type": "Sequence", "id": 5}}
+  ]
+}
