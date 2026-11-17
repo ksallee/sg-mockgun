@@ -116,14 +116,18 @@ Below is a non-exhaustive list of things that we still need to implement:
 
 import copy
 import datetime
+import os
+import urllib.parse
+import urllib.request
 from typing import Any
 
-from shotgun_api3 import Fault, ShotgunError
+from shotgun_api3 import Fault, ShotgunError, ShotgunFileDownloadError, ShotgunThumbnailNotReady
 from shotgun_api3.shotgun import _Config
 from .errors import MockgunError
 from .display import display_name
 from .schema import SchemaFactory
 from . import events as _events
+from . import media as _media
 from . import seed as _seed
 from . import writes as _writes
 from .filters import IGNORED, filter_refusal, jsonb_contains
@@ -254,6 +258,7 @@ class Shotgun(object):
         self._event_user = {"type": "ApiUser", "id": 1, "name": script_name or login or "mockgun"}
         self._column_ids = {}
         self._retired_at = {}
+        self._media_state = _media.new_state()
 
         # set some basic public members that exist in the Shotgun API
         self.base_url = base_url
@@ -697,11 +702,187 @@ class Shotgun(object):
         else:
             return False
 
-    def upload(self, entity_type, entity_id, path, field_name=None, display_name=None, tag_list=None):
-        raise NotImplementedError
+    ###################################################################################################
+    # media: upload, thumbnails, download (sg_mockgun.media, api3 053 to 058)
+
+    def upload(self, entity_type, entity_id, path, field_name=None, display_name=None, tag_list=None,
+               created_at=None):
+        """Store the file's bytes on a new Attachment linked to the entity and return its id (api3 053)."""
+        path = self._upload_path(path, created_at)
+        if field_name in _media.THUMBNAIL_FIELDS:
+            return self._upload_thumbnail(entity_type, entity_id, path, _media.THUMBNAIL_FIELDS[field_name])
+        self._check_upload_target(entity_type, entity_id, path)
+        if field_name is not None and self._schema[entity_type].get(field_name, {}).get(
+                "data_type", {}).get("value") != "url":
+            raise ShotgunError(_media.upload_refusal(path, self.config, _media.invalid_column(entity_type, field_name)))
+        with open(path, "rb") as f:
+            content = f.read()
+        filename = os.path.basename(path)
+        name = display_name or filename
+        entity = self._db[entity_type][entity_id]
+        data = {
+            "attachment_links": [{"type": entity_type, "id": entity_id}],
+            "original_fname": filename,
+            "display_name": name,
+            "tags": [self._tag_link(tag) for tag in _media.tag_names(tag_list)],
+        }
+        if isinstance(entity.get("project"), dict):
+            data["project"] = {"type": "Project", "id": entity["project"]["id"]}
+        if created_at is not None:
+            data["created_at"] = created_at
+        attachment_id = self.create("Attachment", data)["id"]
+        row = self._db["Attachment"][attachment_id]
+        url = _media.storage_url(("Attachment", attachment_id), filename)
+        row["filename"] = filename
+        row["cached_display_name"] = name
+        row["this_file"] = _media.this_file(url, name, filename, attachment_id)
+        self._media_state["files"][attachment_id] = content
+        self._media_state["urls"][url] = attachment_id
+        if field_name is not None:
+            entity[field_name] = copy.deepcopy(row["this_file"])
+            if _media.makes_thumbnail(filename):
+                # api3 053: a media upload makes a thumbnail, for the Attachment and the entity.
+                final = _media.storage_url(("Attachment", attachment_id, "image"), _media.thumbnail_name(filename))
+                row["image_source_entity"] = {"type": "Attachment", "id": attachment_id}
+                row["processing_status"] = _media.PENDING_STATUS
+                self._set_pending("Attachment", attachment_id, "image", final)
+                if "image" in self._schema[entity_type]:
+                    self._set_pending(entity_type, entity_id, "image", final)
+        return attachment_id
 
     def upload_thumbnail(self, entity_type, entity_id, path, **kwargs):
-        pass
+        """Set the entity's image, transient until ``finalize_thumbnails``; return a thumbnail id (api3 055)."""
+        return self.upload(entity_type, entity_id, path, field_name="thumb_image", **kwargs)
+
+    def upload_filmstrip_thumbnail(self, entity_type, entity_id, path, **kwargs):
+        """Set the entity's filmstrip_image at once; return a thumbnail id (api3 055)."""
+        return self.upload(entity_type, entity_id, path, field_name="filmstrip_thumb_image", **kwargs)
+
+    def finalize_thumbnails(self):
+        """Mock only: end every pending transcode, so each transient image reads its final URL."""
+        for (entity_type, entity_id, field), final in self._media_state["pending"].items():
+            row = self._db.get(entity_type, {}).get(entity_id)
+            if row is not None and row.get(field) == _media.transient_url(self.config):
+                row[field] = final
+        self._media_state["pending"] = {}
+
+    def share_thumbnail(self, entities, thumbnail_path=None, source_entity=None, filmstrip_thumbnail=False,
+                        **kwargs):
+        """Point the entities' image at the source's thumbnail and return its id (api3 058)."""
+        # The client's own checks, word for word.
+        if not isinstance(entities, list) or len(entities) == 0:
+            raise ShotgunError("'entities' parameter must be a list of entity hashes and may not be empty")
+        for e in entities:
+            if not isinstance(e, dict) or "id" not in e or "type" not in e:
+                raise ShotgunError("'entities' parameter must be a list of entity hashes with at least "
+                                   "'type' and 'id' keys.\nInvalid entity: %s" % e)
+        if (not thumbnail_path and not source_entity) or (thumbnail_path and source_entity):
+            raise ShotgunError("You must supply either thumbnail_path OR source_entity.")
+        if thumbnail_path:
+            source_entity = entities.pop(0)
+            upload = self.upload_filmstrip_thumbnail if filmstrip_thumbnail else self.upload_thumbnail
+            thumb_id = upload(source_entity["type"], source_entity["id"], thumbnail_path, **kwargs)
+            if len(entities) == 0:
+                return thumb_id
+        elif not isinstance(source_entity, dict) or "id" not in source_entity or "type" not in source_entity:
+            raise ShotgunError("'source_entity' parameter must be a dict with at least 'type' and 'id' keys."
+                               "\nGot: %s (%s)" % (source_entity, type(source_entity)))
+        field = "filmstrip_image" if filmstrip_thumbnail else "image"
+        for e in entities:
+            if e["id"] not in self._db.get(e["type"], {}):
+                raise ShotgunError(_media.share_missing(e["type"], e["id"]))
+        source = self._db[source_entity["type"]][source_entity["id"]]
+        image = source.get(field)
+        if image == _media.transient_url(self.config):
+            raise ShotgunThumbnailNotReady(_media.NOT_READY)
+        for e in entities:
+            self._db[e["type"]][e["id"]][field] = image
+        if image is None:
+            return None
+        return self._media_state["thumbnail_ids"].get((source_entity["type"], source_entity["id"]))
+
+    def get_attachment_download_url(self, attachment):
+        """The URL download_attachment fetches; client-side, no request (api3 057)."""
+        return _media.attachment_download_url(self.config, attachment)
+
+    def download_attachment(self, attachment=False, file_path=None, attachment_id=None):
+        """Return an uploaded file's bytes, or write them to ``file_path`` and return it (api3 056)."""
+        if attachment is False:
+            if type(attachment_id) == int:
+                attachment = attachment_id
+            else:
+                raise TypeError("Missing parameter 'attachment'. Expected a dict, int, NoneType value or"
+                                "an int for parameter attachment_id")
+        fp = open(file_path, "wb") if file_path else None
+        try:
+            url = self.get_attachment_download_url(attachment)
+            if url is None:
+                return None
+            content = self._stored_bytes(url)
+            if fp is None:
+                return content
+            fp.write(content)
+            return file_path
+        finally:
+            if fp is not None:
+                fp.close()
+
+    def _upload_path(self, path, created_at):
+        """The client's checks on the local file, before any request."""
+        path = os.path.abspath(os.path.expanduser(path or ""))
+        if not os.path.isfile(path):
+            raise ShotgunError("Path must be a valid file, got '%s'" % path)
+        if os.path.getsize(path) == 0:
+            raise ShotgunError("Path cannot be an empty file: '%s'" % path)
+        if created_at is not None and not isinstance(created_at, datetime.datetime):
+            raise ShotgunError("created_at must be a datetime.datetime instance, got '%s'" % type(created_at))
+        return path
+
+    def _check_upload_target(self, entity_type, entity_id, path):
+        if entity_type not in self._schema:
+            raise ShotgunError(_media.upload_refusal(path, self.config, _media.invalid_class(entity_type)))
+        row = self._db[entity_type].get(entity_id)
+        if row is None or row["__retired"]:
+            raise ShotgunError(_media.upload_refusal(path, self.config, _media.entity_not_found(entity_type, entity_id)))
+
+    def _upload_thumbnail(self, entity_type, entity_id, path, field):
+        """api3 055: no Attachment; the id comes from a sequence of its own."""
+        self._check_upload_target(entity_type, entity_id, path)
+        thumb_id = self._media_state["next_thumbnail_id"]
+        self._media_state["next_thumbnail_id"] += 1
+        filename = os.path.basename(path)
+        if field in self._schema[entity_type]:
+            if field == "image":
+                final = _media.storage_url((entity_type, entity_id, thumb_id), _media.thumbnail_name(filename))
+                self._set_pending(entity_type, entity_id, field, final)
+                self._media_state["thumbnail_ids"][(entity_type, entity_id)] = thumb_id
+            else:
+                # A filmstrip is not transcoded: it reads the uploaded file at once.
+                self._db[entity_type][entity_id][field] = _media.storage_url((entity_type, entity_id, thumb_id), filename)
+        return thumb_id
+
+    def _set_pending(self, entity_type, entity_id, field, final):
+        self._db[entity_type][entity_id][field] = _media.transient_url(self.config)
+        self._media_state["pending"][(entity_type, entity_id, field)] = final
+
+    def _tag_link(self, name):
+        """A link to the Tag of that name, created when missing (api3 053)."""
+        tag = self.find_one("Tag", [["name", "is", name]])
+        if tag is None:
+            tag = self.create("Tag", {"name": name})
+        return {"type": "Tag", "id": tag["id"]}
+
+    def _stored_bytes(self, url):
+        """The bytes a download URL serves; ShotgunFileDownloadError when nothing is stored there."""
+        if url.startswith("file://"):
+            # The client opens a local link's file:// URL with urllib, which reads the local file.
+            with open(urllib.request.url2pathname(urllib.parse.urlparse(url).path), "rb") as f:
+                return f.read()
+        attachment_id = _media.attachment_id_of(self.config, self._media_state, url)
+        row = self._db["Attachment"].get(attachment_id)
+        if row is None or row["__retired"] or attachment_id not in self._media_state["files"]:
+            raise ShotgunFileDownloadError(_media.download_failure(url))
+        return self._media_state["files"][attachment_id]
 
     def add_user_agent(self, agent):
         pass

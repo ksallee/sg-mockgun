@@ -16,7 +16,7 @@ import json
 from shotgun_api3 import ShotgunError
 
 # Instance attributes that make up a mock site's records and schema.
-_STATE = ("_db", "_schema", "_schema_entity", "_retired_fields", "_retired_at", "_column_ids")
+_STATE = ("_db", "_schema", "_schema_entity", "_retired_fields", "_retired_at", "_column_ids", "_media_state")
 
 
 def load(mock, source):

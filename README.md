@@ -51,6 +51,20 @@ answered over api3 (`docs/api3-probe-2026-11-12.md`), with `shotgun_api3.Fault` 
 Two answers are not recorded over api3 and say so in the code: a `valid_types` with several types
 uses the REST wording, and a `calculated` create carrying a formula is unmeasured.
 
+## Media
+
+`upload`, `upload_thumbnail`, `upload_filmstrip_thumbnail`, `share_thumbnail`, `download_attachment`
+and `get_attachment_download_url` answer as api3 answers 053 to 058 in `docs/api3/`:
+
+- `upload` creates an Attachment, sets a File/Link field to its `this_file`, and returns its id.
+  `tag_list` creates missing Tags.
+- The file's bytes are kept in memory, per instance. `download_attachment` returns them after the
+  source file is gone. They pickle and snapshot with the records.
+- A refused upload raises `ShotgunError` with the site's reason. No row is made.
+- A thumbnail reads `/images/status/transient/thumbnail_pending.png` until `sg.finalize_thumbnails()`.
+  `share_thumbnail` from a transient source raises `ShotgunThumbnailNotReady`.
+- Upload events beyond the Attachment create, and the HTTP server's upload routes, are not modelled.
+
 ## Bundled schema
 
 `sg_mockgun.schemas.paths()` returns a schema pulled from a Flow PT 8.91 site on 2026-11-12: 95
