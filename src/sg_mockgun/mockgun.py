@@ -137,6 +137,7 @@ from . import scheduling as _scheduling
 from . import taskflow as _taskflow
 from . import writes as _writes
 from . import reads as _reads
+from . import records as _records
 from . import summarize as _summarize
 from . import text_search as _text_search
 from .site_info import DEFAULT_INFO
@@ -282,6 +283,14 @@ class Shotgun(object):
         self._media_state = _media.new_state()
         # The studio work week, Monday first (finding 047). Scheduling counts working days on it.
         self.work_week = _scheduling.DEFAULT_WORK_WEEK
+        # The highest id handed out per type, including ids of refused or rolled-back creates (api3 060, 063).
+        self._spent_ids = {}
+        # What a delete changed on other rows, keyed by the deleted row, for revive to put back (api3 027, 065).
+        self._delete_effects = {}
+        # Per-project schema values: {(project id, entity type, field): {"visible": bool, "hidden_values": list}}.
+        self._project_schema = {}
+        # A site refuses a project-scoped create without `project` (api3 060). False lets a test skip it.
+        self.require_project = True
 
         # set some basic public members that exist in the Shotgun API
         self.base_url = base_url
@@ -430,14 +439,43 @@ class Shotgun(object):
 
     def schema_field_read(self, entity_type, field_name=None, project_entity=None):
         self._validate_entity_type(entity_type)
-        if field_name is None:
-            return self._schema[entity_type]
-        if field_name not in self._schema[entity_type]:
+        if field_name is not None and field_name not in self._schema[entity_type]:
             raise Fault(
                 "API schema_field_read() %s.%s doesn't exist:\n%s"
                 % (entity_type, field_name, ruby_params({"type": entity_type, "field_name": field_name}))
             )
-        return {field_name: self._schema[entity_type][field_name]}
+        names = list(self._schema[entity_type]) if field_name is None else [field_name]
+        project_id = project_entity.get("id") if isinstance(project_entity, dict) else None
+        # api3 064: with a project, `visible` and status `hidden_values` read that project's values.
+        overlays = dict(
+            (name, self._project_schema[(project_id, entity_type, name)]) for name in names
+            if (project_id, entity_type, name) in self._project_schema
+        )
+        if not overlays:
+            if field_name is None:
+                return self._schema[entity_type]
+            return {field_name: self._schema[entity_type][field_name]}
+        out = {}
+        for name in names:
+            field = self._schema[entity_type][name]
+            if name in overlays:
+                field = copy.deepcopy(field)
+                if "visible" in overlays[name]:
+                    field["visible"]["value"] = overlays[name]["visible"]
+                if "hidden_values" in overlays[name]:
+                    field["properties"]["hidden_values"] = {"value": list(overlays[name]["hidden_values"]),
+                                                            "editable": False}
+            out[name] = field
+        return out
+
+    def set_project_schema(self, project, entity_type, field_name, visible=None, hidden_values=None):
+        """Set what ``schema_field_read(project_entity=project)`` reads for one field's ``visible`` and ``hidden_values``."""
+        self._validate_entity_fields(entity_type, [field_name])
+        overlay = self._project_schema.setdefault((project["id"], entity_type, field_name), {})
+        if visible is not None:
+            overlay["visible"] = visible
+        if hidden_values is not None:
+            overlay["hidden_values"] = list(hidden_values)
 
     def find(
         self, entity_type, filters, fields=None, order=None, filter_operator=None,
@@ -636,22 +674,24 @@ class Shotgun(object):
         return bool(linked and linked.get("archived") is True)
 
     def batch(self, requests):
-        results = []
         for request in requests:
-            if request["request_type"] == "create":
-                results.append(self.create(request["entity_type"], request["data"]))
-            elif request["request_type"] == "update":
-                # note: Shotgun.update returns a list of a single item
-                results.append(
-                    self.update(request["entity_type"],
-                                request["entity_id"],
-                                request["data"],
-                                request.get("multi_entity_update_modes"))[0]
-                )
-            elif request["request_type"] == "delete":
-                results.append(self.delete(request["entity_type"], request["entity_id"]))
-            else:
+            if request["request_type"] not in ("create", "update", "delete"):
                 raise ShotgunError("Invalid request type %s in request %s" % (request["request_type"], request))
+        # api3 063: one failing request rolls back every other one. Ids already handed out stay spent.
+        saved = copy.deepcopy((self._db, self._retired_at, self._delete_effects))
+        results = []
+        for index, request in enumerate(requests):
+            try:
+                if request["request_type"] == "create":
+                    results.append(self.create(request["entity_type"], request["data"]))
+                elif request["request_type"] == "update":
+                    results.append(self.update(request["entity_type"], request["entity_id"], request["data"],
+                                               request.get("multi_entity_update_modes")))
+                else:
+                    results.append(self.delete(request["entity_type"], request["entity_id"]))
+            except ShotgunError as e:
+                self._db, self._retired_at, self._delete_effects = saved
+                raise Fault(_records.rolled_back(index, str(e)))
         return results
 
     def create(self, entity_type, data, return_fields=None):
@@ -674,15 +714,13 @@ class Shotgun(object):
                     data[d]["local_path_mac"] = data[d]["local_path"]
 
         self._validate_entity_type(entity_type)
+        self._check_create_contract(entity_type, data, return_fields)
         data = dict(data)
         upload_image = data.pop("image", None)  # api3 035: the client never sends image on create
         data = self._validate_entity_data(entity_type, data, "create")
+        data = self._check_status(entity_type, data, "create")
         self._validate_entity_fields(entity_type, return_fields)
-        try:
-            # get next id in this table
-            next_id = max(self._db[entity_type]) + 1
-        except ValueError:
-            next_id = 1
+        next_id = self._next_id(entity_type)
 
         row = self._get_new_row(entity_type)
 
@@ -692,6 +730,10 @@ class Shotgun(object):
         server_set = _writes.new_row_values(
             entity_type, self._schema[entity_type], self._event_user, now, display_name(entity_type, row))
         row.update((field, value) for field, value in server_set.items() if field not in data)
+        identity = _records.IDENTITY_FIELDS.get(entity_type)
+        if identity and identity not in data:
+            # finding 012, api3 060
+            row[identity] = "New %s %d" % (self._schema_entity[entity_type]["name"]["value"], next_id)
 
         self._db[entity_type][next_id] = row
 
@@ -725,7 +767,8 @@ class Shotgun(object):
         dotted = dict((field, data.pop(field)) for field in list(data) if "." in field)
         self._validate_entity_fields(entity_type, dotted.keys())
         data = self._validate_entity_data(entity_type, data)
-        self._validate_entity_exists(entity_type, entity_id)
+        data = self._check_status(entity_type, data, "update")
+        self._validate_entity_exists(entity_type, entity_id, "update")
         _taskflow.before_update(self, entity_type, data)
 
         row = self._db[entity_type][entity_id]
@@ -750,11 +793,11 @@ class Shotgun(object):
         result.update(dotted)
         if upload_image:
             self._client_upload_image(entity_type, entity_id, upload_image, result)
-        return [result]
+        return result
 
     def delete(self, entity_type, entity_id):
         self._validate_entity_type(entity_type)
-        self._validate_entity_exists(entity_type, entity_id)
+        self._validate_entity_exists(entity_type, entity_id, "delete")
 
         row = self._db[entity_type][entity_id]
         if not row["__retired"]:
@@ -771,6 +814,8 @@ class Shotgun(object):
                     row, linked=False,
                 )
             _taskflow.after_delete(self, entity_type, row)
+            if entity_type != "EventLogEntry":
+                self._apply_delete_effects(entity_type, entity_id)
             return True
         else:
             return False
@@ -788,6 +833,7 @@ class Shotgun(object):
                     _events.entity_revived(self._event_user["name"], entity_type, entity_id, self._row_name(row), when),
                     row,
                 )
+                self._undo_delete_effects(entity_type, entity_id)
             _taskflow.after_revive(self, entity_type, row)
             return True
         else:
@@ -1671,9 +1717,75 @@ class Shotgun(object):
         name = display_name(link["type"], target) if target is not None else link.get("name")
         return {"type": link["type"], "id": link["id"], "name": name}
 
-    def _validate_entity_exists(self, entity_type, entity_id):
+    def _validate_entity_exists(self, entity_type, entity_id, verb=None):
         if entity_id not in self._db[entity_type]:
+            if verb in ("update", "delete"):
+                raise Fault(_records.missing_entity(verb, entity_type, entity_id))  # api3 063
             raise ShotgunError("No entity of type %s exists with id %s" % (entity_type, entity_id))
+
+    def _next_id(self, entity_type):
+        """Hand out the next id for a type, past every id already in the table or spent."""
+        next_id = max(max(self._db[entity_type], default=0), self._spent_ids.get(entity_type, 0)) + 1
+        self._spent_ids[entity_type] = next_id
+        return next_id
+
+    def _check_create_contract(self, entity_type, data, return_fields):
+        """Raise the Fault a site answers for a create with no fields, no project or an empty identity."""
+        if not data:
+            raise Fault(_records.no_fields(entity_type, return_fields))  # api3 060, 061
+        if self.require_project and entity_type in _records.PROJECT_SCOPED and "project" not in data:
+            raise Fault(_records.missing_project(data))  # api3 060
+        identity = _records.IDENTITY_FIELDS.get(entity_type)
+        if identity in data and data[identity] in ("", None):
+            self._next_id(entity_type)  # api3 060: the refused create spends an id.
+            raise Fault(_records.empty_identity(entity_type))
+
+    def _check_status(self, entity_type, data, verb):
+        """Refuse a status outside ``valid_values``; return data with "" stored as None (api3 062)."""
+        out = dict(data)
+        for field, value in data.items():
+            info = self._schema[entity_type].get(field)
+            if not info or info["data_type"]["value"] != "status_list":
+                continue
+            if value in ("", None):
+                out[field] = None
+                continue
+            valid = info["properties"]["valid_values"]["value"]
+            if value not in valid:
+                raise Fault(_records.bad_status(verb, entity_type, field, value, valid))
+        return out
+
+    def _apply_delete_effects(self, entity_type, entity_id):
+        """Null entity links to a deleted row and retire Versions it is the `entity` of (api3 027, 065)."""
+        link = {"type": entity_type, "id": entity_id}
+        cleared, retired = [], []
+        for other_type, rows in self._db.items():
+            if other_type == "EventLogEntry":
+                continue
+            fields = [f for f, info in self._schema[other_type].items() if info["data_type"]["value"] == "entity"]
+            for row in rows.values():
+                for field in fields:
+                    value = row.get(field)
+                    if row["__retired"] or not isinstance(value, dict) or not _same_link(value, link):
+                        continue
+                    if other_type == "Version" and field == "entity":
+                        retired.append(row["id"])
+                    else:
+                        row[field] = None
+                        cleared.append((other_type, row["id"], field))
+        for version_id in retired:
+            self.delete("Version", version_id)
+        self._delete_effects[(entity_type, entity_id)] = (cleared, retired)
+
+    def _undo_delete_effects(self, entity_type, entity_id):
+        """Put back what deleting a row changed on other rows, where nothing has set them since."""
+        cleared, retired = self._delete_effects.pop((entity_type, entity_id), ([], []))
+        for version_id in retired:
+            self.revive("Version", version_id)
+        for other_type, other_id, field in cleared:
+            row = self._db[other_type].get(other_id)
+            if row is not None and row.get(field) is None:
+                row[field] = {"type": entity_type, "id": entity_id}
 
     ###################################################################################################
     # summarize, text_search, info (sg_mockgun.summarize, sg_mockgun.text_search, sg_mockgun.site_info)

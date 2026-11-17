@@ -135,7 +135,7 @@ def test_create_and_update_return_links_with_names(sg, project):
     v = sg.create("Version", {"code": "v001", "project": project, "entity": shot})
     assert v["entity"] == {"type": "Shot", "id": shot["id"], "name": "sh010"}
     assert v["project"] == {"type": "Project", "id": project["id"], "name": "sandbox"}
-    updated = sg.update("Version", v["id"], {"entity": shot})[0]
+    updated = sg.update("Version", v["id"], {"entity": shot})
     assert updated["entity"] == {"type": "Shot", "id": shot["id"], "name": "sh010"}
 
 

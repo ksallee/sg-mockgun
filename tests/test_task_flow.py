@@ -10,6 +10,7 @@ DEP = ["task", "dependent_task", "dependency_type", "offset_days"]
 
 @pytest.fixture
 def site(sg):
+    sg.require_project = False  # template Tasks are created without a project; unmeasured whether a site requires one
     project = sg.create("Project", {"name": "Sandbox"})
     steps = dict((code, sg.create("Step", {"code": code, "entity_type": "Shot"})) for code in ("Model", "Comp", "Light"))
     return sg, project, steps

@@ -17,6 +17,7 @@ def sg():
     Shotgun.set_schema_paths(*schemas.paths())
     sg = Shotgun("https://mock.example.com", script_name="x", api_key="y")
     sg.set_clock(lambda: NOW)
+    sg.require_project = False  # the create contract is tested in test_records.py
     return sg
 
 
@@ -24,8 +25,10 @@ def put(sg, entity_type, field, values):
     """One row per value, the value written straight into the store."""
     ids = []
     for value in values:
-        row = sg.create(entity_type, {})
-        sg._db[entity_type][row["id"]][field] = value
+        row = sg._get_new_row(entity_type)
+        row["id"] = sg._next_id(entity_type)
+        row[field] = value
+        sg._db[entity_type][row["id"]] = row
         ids.append(row["id"])
     return ids
 

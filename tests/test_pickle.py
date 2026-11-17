@@ -8,7 +8,8 @@ from sg_mockgun import Shotgun, schemas
 def test_instance_pickles_with_its_records():
     Shotgun.set_schema_paths(*schemas.paths())
     sg = Shotgun("https://mock.example.com", script_name="x", api_key="y")
-    shot = sg.create("Shot", {"code": "sh010"})
+    project = sg.create("Project", {"name": "p"})
+    shot = sg.create("Shot", {"code": "sh010", "project": project})
     copy = pickle.loads(pickle.dumps(sg))
     assert copy.find_one("Shot", [["id", "is", shot["id"]]], ["code"])["code"] == "sh010"
 

@@ -9,7 +9,9 @@ from sg_mockgun import Shotgun, schemas
 @pytest.fixture
 def sg():
     Shotgun.set_schema_paths(*schemas.paths())
-    return Shotgun("https://mock.example.com", script_name="probe-script", api_key="y")
+    sg = Shotgun("https://mock.example.com", script_name="probe-script", api_key="y")
+    sg.require_project = False  # the create contract is tested in test_records.py
+    return sg
 
 
 @pytest.fixture
