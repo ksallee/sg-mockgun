@@ -116,9 +116,9 @@ Below is a non-exhaustive list of things that we still need to implement:
 
 import copy
 import datetime
+import importlib.metadata
 import os
 import urllib.parse
-import importlib.metadata
 import urllib.request
 from typing import Any
 
