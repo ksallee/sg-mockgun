@@ -810,8 +810,12 @@ class Shotgun(object):
         :returns: The result of the operator that was applied.
         :rtype: bool
         """
-        # If we have a list of scalar values
+        # A list of scalar values comes from a dotted path through a multi_entity field.
         if isinstance(lval, list) and field_type != "multi_entity":
+            # No linked row of the named type matches no operator. Unmeasured: finding 016's
+            # is_not null sample may have had every row linked (sg-groundtruth#109).
+            if not lval:
+                return False
             # Compare each one. If one matches the predicate we're good!
             return any((self._compare(field_type, sub_val, operator, rval)) for sub_val in lval)
 
@@ -952,10 +956,9 @@ class Shotgun(object):
                 elif not isinstance(field_value, dict):
                     raise ShotgunError("Invalid deep query field %s.%s" % (entity_type, field))
 
-                # make sure that types in the query match type in the linked field
+                # A link to another type reads the path as null (field_types/entity).
                 if entity_type2 != field_value["type"]:
-                    raise ShotgunError("Deep query field %s.%s does not match type "
-                                       "with data %s" % (entity_type, field, field_value))
+                    return None
 
                 # ok so looks like the value is an entity link
                 # e.g. db contains: {"sg_sequence": {"type":"Sequence", "id": 123 } }
@@ -975,12 +978,17 @@ class Shotgun(object):
                 return None
 
     def _get_field_type(self, entity_type, field):
-        # split dotted form fields
-        try:
-            field2, entity_type2, field3 = field.split(".", 2)
-            return self._get_field_type(entity_type2, field3)
-        except ValueError:
+        """Return the data type of a field or of the last field of a dotted path."""
+        parts = field.split(".")
+        if len(parts) < 3:
             return self._schema[entity_type][field]["data_type"]["value"]
+        # Each named type must have the field after it, whatever the link's valid_types (finding 016).
+        for i in range(1, len(parts) - 1, 2):
+            fields = self._schema.get(parts[i], {})
+            if parts[i + 1] not in fields:
+                # REST wording; api3 unprobed (sg-groundtruth#109)
+                raise ShotgunError("%s.%s doesn't exist." % (entity_type, field))
+        return fields[parts[-1]]["data_type"]["value"]
 
     def _row_matches_filter(self, entity_type, row, sg_filter, retired_only):
 
