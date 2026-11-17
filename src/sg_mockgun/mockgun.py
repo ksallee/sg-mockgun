@@ -665,6 +665,8 @@ class Shotgun(object):
                     data[d]["local_path_mac"] = data[d]["local_path"]
 
         self._validate_entity_type(entity_type)
+        data = dict(data)
+        upload_image = data.pop("image", None)  # api3 035: the client never sends image on create
         data = self._validate_entity_data(entity_type, data, "create")
         self._validate_entity_fields(entity_type, return_fields)
         try:
@@ -677,6 +679,10 @@ class Shotgun(object):
 
         self._update_row(entity_type, row, data)
         row["id"] = next_id
+        now = self._clock()
+        server_set = _writes.new_row_values(
+            entity_type, self._schema[entity_type], self._event_user, now, display_name(entity_type, row))
+        row.update((field, value) for field, value in server_set.items() if field not in data)
 
         self._db[entity_type][next_id] = row
 
@@ -688,22 +694,27 @@ class Shotgun(object):
             ]
             self._log(
                 _events.entity_created(self._event_user["name"], entity_type, next_id, self._row_name(row), changes),
-                row,
+                row, now=now,
             )
         _taskflow.after_create(self, entity_type, row, data)
 
-        if return_fields is None:
-            result = dict((field, self._read_field(entity_type, row, field)) for field in data)
-        else:
-            result = dict((field, self._read_field(entity_type, row, field)) for field in return_fields)
+        # api3 038: the fields sent, plus the return_fields asked for.
+        result = dict((field, self._read_field(entity_type, row, field)) for field in data)
+        result.update((field, self._read_field(entity_type, row, field)) for field in return_fields or [])
 
         result["type"] = row["type"]
         result["id"] = row["id"]
 
+        if upload_image:
+            self._client_upload_image(entity_type, row["id"], upload_image, result)
         return result
 
     def update(self, entity_type, entity_id, data, multi_entity_update_modes=None):
         self._validate_entity_type(entity_type)
+        data = dict(data)
+        upload_image = data.pop("image") if data.get("image") is not None else None  # api3 035
+        dotted = dict((field, data.pop(field)) for field in list(data) if "." in field)
+        self._validate_entity_fields(entity_type, dotted.keys())
         data = self._validate_entity_data(entity_type, data)
         self._validate_entity_exists(entity_type, entity_id)
         _taskflow.before_update(self, entity_type, data)
@@ -722,9 +733,14 @@ class Shotgun(object):
             self._log(rows, row)
         _taskflow.after_update(self, entity_type, row, data, before)
 
+        self._write_through(row, dotted)
+
         result = dict((field, self._read_field(entity_type, row, field)) for field in data)
         result["type"] = row["type"]
         result["id"] = row["id"]
+        result.update(dotted)
+        if upload_image:
+            self._client_upload_image(entity_type, entity_id, upload_image, result)
         return [result]
 
     def delete(self, entity_type, entity_id):
@@ -767,6 +783,23 @@ class Shotgun(object):
             return True
         else:
             return False
+
+    def _write_through(self, row, dotted):
+        """Write each `link.Type.field` value to the row the link points at (api3 039)."""
+        for path, value in dotted.items():
+            link_field, target_type, target_field = path.split(".", 2)
+            link = row.get(link_field)
+            # A link that is empty or of another type: api3 unprobed (sg-mockgun#39); nothing is written.
+            if isinstance(link, dict) and link.get("type") == target_type:
+                self.update(target_type, link["id"], {target_field: value})
+
+    def _client_upload_image(self, entity_type, entity_id, path, result):
+        """Upload an image the way the client does after its create or update (api3 035)."""
+        path = os.path.abspath(os.path.expanduser(path or ""))
+        if not os.path.isfile(path):
+            raise ShotgunError("Path must be a valid file, got '%s'" % path)
+        self.upload_thumbnail(entity_type, entity_id, path)
+        result["image"] = self.find_one(entity_type, [["id", "is", entity_id]], ["image"])["image"]
 
     ###################################################################################################
     # media: upload, thumbnails, download (sg_mockgun.media, api3 053 to 058)
@@ -959,12 +992,12 @@ class Shotgun(object):
     ###################################################################################################
     # internal methods and members
 
-    def _log(self, rows, source=None, linked=True):
+    def _log(self, rows, source=None, linked=True, now=None):
         """Append event rows, filling id, entity, project, user and created_at."""
         if not rows or not self.generate_event_log_entries or "EventLogEntry" not in self._db:
             return
         table = self._db["EventLogEntry"]
-        now = self._clock()
+        now = now or self._clock()
         for partial in rows:
             event = self._get_new_row("EventLogEntry")
             event.update(partial)
@@ -1006,17 +1039,25 @@ class Shotgun(object):
         if "id" in data or "type" in data:
             raise ShotgunError("Can't set id or type on create or update")
 
-        self._validate_entity_fields(entity_type, data.keys())
+        fields = self._schema[entity_type]
+        for field, item in data.items():
+            if "." in field:
+                self._validate_entity_fields(entity_type, [field])
+            elif field not in fields:
+                raise _writes.unknown_field(verb, entity_type, field, item)  # api3 039
 
         stored = dict(data)
         for field, item in data.items():
-            if item is None and field not in self._schema[entity_type]:
+            if field not in fields:
                 continue
-            field_info = self._schema[entity_type][field]
+            field_info = fields[field]
             sg_type = field_info["data_type"]["value"]
-            item = stored[field] = _writes.check_value(verb, entity_type, field, sg_type, item)
+            editable = field_info.get("editable", {}).get("value", False)
+            item = stored[field] = _writes.check_value(verb, entity_type, field, sg_type, item, editable)
 
-            if item is None or (sg_type in _writes.RULES and sg_type != "multi_entity"):
+            if item is None or (entity_type, field) == ("Task", "splits"):
+                continue
+            if sg_type in _writes.RULES and sg_type not in ("multi_entity", "serializable"):
                 continue
 
             if field_info["data_type"]["value"] == "multi_entity":
