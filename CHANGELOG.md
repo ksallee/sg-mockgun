@@ -59,8 +59,8 @@ sg-mockgun follows [Semantic Versioning](https://semver.org/). Numbers are pull 
 
 ### Docs and packaging
 
-- Docs site in `site/`, served at sg-mockgun.vercel.app. Changelog, PyPI classifiers, keywords and project URLs, credits.
-- `sg_mockgun.__version__` at package level.
+- Docs site in `site/`, served at sg-mockgun.vercel.app. Changelog, PyPI classifiers, keywords and project URLs, credits. (#63)
+- `sg_mockgun.__version__` at package level (#63).
 
 ## 0.1.0
 
