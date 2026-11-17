@@ -90,7 +90,9 @@ def run_suite(workdir, label, event_log, extra):
     env = dict(os.environ)
     env["SG_MOCKGUN_EVENT_LOG"] = "1" if event_log else "0"
     env["PYTHONPATH"] = os.pathsep.join(p for p in (SHIM_DIR, env.get("PYTHONPATH")) if p)
-    cmd = [sys.executable, "-m", "pytest", "-p", "sg_mockgun_tk_core_shim", "tests",
+    # sg_mockgun's own pytest11 plugin imports shotgun_api3 before tank_vendor has put tk-core's
+    # copy on sys.path, so it is turned off. The shim imports sg_mockgun after tank_vendor.
+    cmd = [sys.executable, "-m", "pytest", "-p", "no:sg_mockgun", "-p", "sg_mockgun_tk_core_shim", "tests",
            "-q", "-rfE", "--tb=short", "-p", "no:cacheprovider", "--junitxml", junit]
     cmd += ["--ignore=%s" % path for path in IGNORED]
     cmd += extra

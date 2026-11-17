@@ -1,5 +1,7 @@
 """upload, thumbnails, download and share_thumbnail, shaped like api3 answers 053 to 058."""
 
+import os
+import pathlib
 import pickle
 
 import pytest
@@ -112,7 +114,8 @@ def test_upload_refusals(sg, files, version, entity_type, entity_id, field_name,
 def test_upload_path_checks(sg, version, tmp_path):
     with pytest.raises(ShotgunError) as e:
         sg.upload("Version", version["id"], "/nonexistent/probe.png")
-    assert str(e.value) == "Path must be a valid file, got '/nonexistent/probe.png'"
+    # The client makes the path absolute with os.path, so Windows shows a drive and backslashes.
+    assert str(e.value) == "Path must be a valid file, got '%s'" % os.path.abspath("/nonexistent/probe.png")
     empty = tmp_path / "empty.txt"
     empty.write_bytes(b"")
     with pytest.raises(ShotgunError) as e:
@@ -202,7 +205,15 @@ def test_download_of_deleted_attachment_is_404(sg, files, version):
 # api3 056
 def test_download_local_link_reads_the_file(sg, files):
     _, txt = files
-    assert sg.download_attachment({"link_type": "local", "url": "file://" + txt}) == TXT
+    url = pathlib.Path(txt).as_uri()
+    assert sg.download_attachment({"link_type": "local", "url": url}) == TXT
+
+
+def test_download_local_link_to_a_missing_file_raises(sg, tmp_path):
+    url = (tmp_path / "missing.txt").as_uri()
+    with pytest.raises(ShotgunFileDownloadError) as e:
+        sg.download_attachment({"link_type": "local", "url": url})
+    assert str(e.value).startswith("Failed to open %s\n" % url)
 
 
 # api3 057

@@ -118,6 +118,7 @@ import copy
 import datetime
 import importlib.metadata
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -1029,9 +1030,12 @@ class Shotgun(object):
     def _stored_bytes(self, url):
         """The bytes a download URL serves; ShotgunFileDownloadError when nothing is stored there."""
         if url.startswith("file://"):
-            # The client opens a local link's file:// URL with urllib, which reads the local file.
-            with open(urllib.request.url2pathname(urllib.parse.urlparse(url).path), "rb") as f:
-                return f.read()
+            # The client opens a local link's file:// URL with a urllib opener and wraps URLError.
+            try:
+                with urllib.request.build_opener().open(urllib.request.Request(url)) as response:
+                    return response.read()
+            except urllib.error.URLError as e:
+                raise ShotgunFileDownloadError("Failed to open %s\n%s" % (url, e))
         attachment_id = _media.attachment_id_of(self.config, self._media_state, url)
         row = self._db["Attachment"].get(attachment_id)
         if row is None or row["__retired"] or attachment_id not in self._media_state["files"]:
