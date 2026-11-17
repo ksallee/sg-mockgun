@@ -42,7 +42,7 @@ def filter_refusal(entity_type, field, data_type, operator, rval):
     """The site's error for a filter it refuses, or None when the filter is accepted.
 
     ``entity_type`` and ``field`` name the last hop of a dotted path. Wording is REST wording;
-    api3 is unprobed (sg-groundtruth#109).
+    api3 is unprobed (sg-mockgun#39).
     """
     path = "%s.%s" % (entity_type, field)
     if data_type in UNFILTERABLE:

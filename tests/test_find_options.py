@@ -112,7 +112,7 @@ def test_order_on_a_dotted_path(sg):
     assert codes(rows) == ["v1", "v2"]
 
 
-# documented, unprobed (sg-groundtruth#109)
+# documented, unprobed (sg-mockgun#39)
 def test_include_archived_projects(sg):
     live = sg.create("Project", {"name": "live"})
     gone = sg.create("Project", {"name": "gone", "archived": True})

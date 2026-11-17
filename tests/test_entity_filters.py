@@ -50,7 +50,7 @@ def test_entity_in_matches_any_listed_entity(versions):
 
 def test_entity_not_in(versions):
     sg, a, b, _, _ = versions
-    # unlinked rows unmeasured on entity (sg-groundtruth#109); negation matches null rows
+    # unlinked rows unmeasured on entity (sg-mockgun#39); negation matches null rows
     assert codes(sg, "Version", [["entity", "not_in", [a, b]]]) == ["vasset", "vnone"]
     assert codes(sg, "Version", [["entity", "not_in", a]]) == ["vasset", "vb", "vnone"]
 

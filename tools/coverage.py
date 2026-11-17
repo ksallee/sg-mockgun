@@ -53,7 +53,7 @@ def render(mock, live):
         "",
         header,
         "",
-        "`REST only`: the finding was measured over REST and its api3 probe is open (sg-groundtruth#109).",
+        "`REST only`: the finding was measured over REST and its api3 probe is open (sg-mockgun#39).",
         "",
         "| method | operator | field type | mock | site | finding | evidence |",
         "|---|---|---|---|---|---|---|",
