@@ -1,6 +1,6 @@
 """Value rules for writes to a field, by data type. Pure: no I/O, no state.
 
-Every message is the REST wording; api3 unprobed (sg-groundtruth#109).
+Every message is the REST wording; api3 unprobed (sg-mockgun#39).
 """
 
 import re

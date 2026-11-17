@@ -418,7 +418,7 @@ class Shotgun(object):
             raise ValueError("page parameter must be a positive integer")
         if additional_filter_presets:
             raise ShotgunError(
-                "additional_filter_presets is not modelled by sg-mockgun (sg-groundtruth#109)."
+                "additional_filter_presets is not modelled by sg-mockgun (sg-mockgun#39)."
             )
 
         self.finds += 1
@@ -461,7 +461,7 @@ class Shotgun(object):
         ]
 
         if not include_archived_projects:
-            # documented, unprobed (sg-groundtruth#109)
+            # documented, unprobed (sg-mockgun#39)
             results = [row for row in results if not self._in_archived_project(row)]
 
         # finding 026: id ascending is the default order and the last tiebreak.
@@ -898,7 +898,7 @@ class Shotgun(object):
         # A jsonb array is one value.
         if isinstance(lval, list) and field_type not in ("multi_entity", "jsonb"):
             # No linked row of the named type matches no operator. Unmeasured: finding 016's
-            # is_not null sample may have had every row linked (sg-groundtruth#109).
+            # is_not null sample may have had every row linked (sg-mockgun#39).
             if not lval:
                 return False
             # Compare each one. If one matches the predicate we're good!
@@ -1004,7 +1004,7 @@ class Shotgun(object):
         elif field_type == "entity":
             # field_types/entity
             if operator in ("name_is", "name_contains", "name_not_contains") and rval is None:
-                # wording unmeasured; REST answers 400 (sg-groundtruth#109)
+                # wording unmeasured; REST answers 400 (sg-mockgun#39)
                 raise ShotgunError("API read() '%s' 'relation' does not accept a null value" % operator)
             if operator in ("in", "not_in") and isinstance(rval, dict):
                 rval = [rval]
@@ -1023,7 +1023,7 @@ class Shotgun(object):
             elif lval is None and operator in ("in", "type_is", "name_is", "name_contains"):
                 return False
             elif lval is None and operator in ("not_in", "type_is_not", "name_not_contains"):
-                # unlinked rows unmeasured on entity (sg-groundtruth#109)
+                # unlinked rows unmeasured on entity (sg-mockgun#39)
                 return True
             elif operator == "in":
                 return any(_same_link(lval, sub_rval) for sub_rval in rval)
@@ -1043,7 +1043,7 @@ class Shotgun(object):
             # field_types/multi_entity
             if operator == "is" and isinstance(rval, list):
                 if len(rval) != 1:
-                    # REST wording; api3 unprobed (sg-groundtruth#109)
+                    # REST wording; api3 unprobed (sg-mockgun#39)
                     raise ShotgunError(
                         "API read() 'is' 'relation' expects a 1-element array: %s" % ruby_inspect(rval)
                     )
@@ -1052,7 +1052,7 @@ class Shotgun(object):
                 if isinstance(rval, dict):
                     rval = [rval]
                 if not rval:
-                    # REST wording; api3 unprobed (sg-groundtruth#109)
+                    # REST wording; api3 unprobed (sg-mockgun#39)
                     raise ShotgunError(
                         "API read() '%s' 'relation' expects at least a 1-element array: []" % operator
                     )
@@ -1143,7 +1143,7 @@ class Shotgun(object):
         for i in range(1, len(parts) - 1, 2):
             fields = self._schema.get(parts[i], {})
             if parts[i + 1] not in fields:
-                # REST wording; api3 unprobed (sg-groundtruth#109)
+                # REST wording; api3 unprobed (sg-mockgun#39)
                 raise ShotgunError("%s.%s doesn't exist." % (entity_type, field))
         return fields[parts[-1]]["data_type"]["value"]
 
@@ -1192,7 +1192,7 @@ class Shotgun(object):
             _, entity_type, field = field.split(".", 2)
         refusal = filter_refusal(entity_type, field, field_type, operator, rval)
         if refusal:
-            # REST wording; api3 unprobed (sg-groundtruth#109)
+            # REST wording; api3 unprobed (sg-mockgun#39)
             raise ShotgunError(refusal)
         return (entity_type, field) in IGNORED
 
