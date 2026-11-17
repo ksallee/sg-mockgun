@@ -399,8 +399,18 @@ class Shotgun(object):
 
     def find(
         self, entity_type, filters, fields=None, order=None, filter_operator=None,
-        limit=0, retired_only=False, page=0
+        limit=0, retired_only=False, page=0, include_archived_projects=True,
+        additional_filter_presets=None,
     ):
+        # Argument checks and the limit and page arithmetic follow shotgun_api3.Shotgun.find.
+        if not isinstance(limit, int) or limit < 0:
+            raise ValueError("limit parameter must be a positive integer")
+        if not isinstance(page, int) or page < 0:
+            raise ValueError("page parameter must be a positive integer")
+        if additional_filter_presets:
+            raise ShotgunError(
+                "additional_filter_presets is not modelled by sg-mockgun (sg-groundtruth#109)."
+            )
 
         self.finds += 1
 
@@ -441,16 +451,21 @@ class Shotgun(object):
             )
         ]
 
-        # handle the ordering of the recordset
+        if not include_archived_projects:
+            # documented, unprobed (sg-groundtruth#109)
+            results = [row for row in results if not self._in_archived_project(row)]
+
+        # finding 026: id ascending is the default order and the last tiebreak.
+        results = sorted(results, key=lambda row: row["id"])
+
         if order:
             # order: [{"field_name": "code", "direction": "asc"}, ... ]
-            def sort_none(k, order_field):
+            def sort_none(k, order_field, field_type):
                 """
                 Handle sorting of None consistently.
                 Note: Doesn't handle [checkbox, serializable, url].
                 """
-                field_type = self._get_field_type(k["type"], order_field)
-                value = k[order_field]
+                value = self._get_field_from_row(entity_type, k, order_field)
                 if value is not None:
                     return value
                 elif field_type in ("number", "percent", "duration"):
@@ -463,6 +478,7 @@ class Shotgun(object):
                     return datetime.datetime(datetime.MINYEAR, 1, 1)
                 return None
 
+            keys = []
             for order_entry in order:
                 if "field_name" not in order_entry:
                     raise ValueError("Order clauses must be list of dicts with keys 'field_name' and 'direction'!")
@@ -475,11 +491,32 @@ class Shotgun(object):
                 else:
                     raise ValueError("Unknown ordering direction")
 
+                # finding 026: a summary, url or unknown field is ignored.
+                try:
+                    field_type = self._get_field_type(entity_type, order_field)
+                except KeyError:
+                    continue
+                if field_type in ("summary", "url"):
+                    continue
+                keys.append((order_field, field_type, desc_order))
+
+            # finding 026: the first key is primary. Stable sorts run from the last key to the first.
+            for order_field, field_type, desc_order in reversed(keys):
                 results = sorted(
                     results,
-                    key=lambda k: sort_none(k, order_field),
+                    key=lambda k: sort_none(k, order_field, field_type),
                     reverse=desc_order,
                 )
+
+        # finding 082: a page has 500 rows unless limit is smaller.
+        page_size = 500
+        if limit and limit <= page_size:
+            page_size = limit
+            page = page or 1
+        if page:
+            results = results[(page - 1) * page_size:page * page_size]
+        elif limit:
+            results = results[:limit]
 
         if fields is None:
             fields = set(["type", "id"])
@@ -493,13 +530,23 @@ class Shotgun(object):
 
     def find_one(
         self, entity_type, filters, fields=None, order=None, filter_operator=None,
-        retired_only=False
+        retired_only=False, include_archived_projects=True, additional_filter_presets=None,
     ):
         results = self.find(
             entity_type, filters, fields=fields,
-            order=order, filter_operator=filter_operator, retired_only=retired_only
+            order=order, filter_operator=filter_operator, limit=1, retired_only=retired_only,
+            include_archived_projects=include_archived_projects,
+            additional_filter_presets=additional_filter_presets,
         )
         return results[0] if results else None
+
+    def _in_archived_project(self, row):
+        """Return True when the row's project links a Project whose archived is True."""
+        project = row.get("project")
+        if not isinstance(project, dict) or project.get("type") != "Project":
+            return False
+        linked = self._db.get("Project", {}).get(project.get("id"))
+        return bool(linked and linked.get("archived") is True)
 
     def batch(self, requests):
         results = []
