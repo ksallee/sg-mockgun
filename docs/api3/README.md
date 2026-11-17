@@ -18,7 +18,7 @@ With writes, in the sandbox project only:
 uv run python probes/NNN_slug.py --write
 ```
 
-Credentials come from `.env.local` here, else `../sg-groundtruth/.env.local`.
+Credentials come from `.env.local` here, else from a sibling `sg-groundtruth/.env.local`, one or two levels up.
 
 ## Numbers
 
