@@ -750,6 +750,8 @@ class Shotgun(object):
 
         stored = dict(data)
         for field, item in data.items():
+            if item is None and field not in self._schema[entity_type]:
+                continue
             field_info = self._schema[entity_type][field]
             sg_type = field_info["data_type"]["value"]
             item = stored[field] = _writes.check_value(verb, entity_type, field, sg_type, item)
