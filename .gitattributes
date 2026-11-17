@@ -1,0 +1,2 @@
+# Upstream pickles are protocol 0, which is text: a CRLF checkout corrupts them.
+*.pickle binary
