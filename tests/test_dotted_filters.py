@@ -50,12 +50,11 @@ def test_positive_dotted_filters_through_multi_entity_match(sg, notes):
     assert sg.find("Note", [["note_links.Asset.sg_asset_type", "is", "ZZZNOPE"]]) == []
 
 
-def test_is_not_null_through_multi_entity_matches_rows_without_links(sg, notes):
-    # finding 016: note_links.Shot.sg_sequence.Sequence.code is_not null matched 5944 of 5944 Notes.
+def test_is_not_null_two_hops_through_multi_entity_matches_linked_rows(sg, notes):
+    # finding 016: note_links.Shot.sg_sequence.Sequence.code is_not null matched linked Notes.
+    # Rows with no Shot link are unmeasured and do not match.
     rows = sg.find("Note", [["note_links.Shot.sg_sequence.Sequence.code", "is_not", None]])
-    assert notes["asset"]["id"] in ids(rows)
-    assert notes["none"]["id"] in ids(rows)
-    assert notes["shot"]["id"] in ids(rows)
+    assert ids(rows) == [notes["shot"]["id"]]
 
 
 @pytest.mark.parametrize("path", [

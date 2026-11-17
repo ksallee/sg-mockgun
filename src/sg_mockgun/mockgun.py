@@ -812,10 +812,10 @@ class Shotgun(object):
         """
         # A list of scalar values comes from a dotted path through a multi_entity field.
         if isinstance(lval, list) and field_type != "multi_entity":
-            # No linked row of the named type: is_not null matches (finding 016).
-            # Other operators over no linked row are unmeasured and do not match.
+            # No linked row of the named type matches no operator. Unmeasured: finding 016's
+            # is_not null sample may have had every row linked (sg-groundtruth#109).
             if not lval:
-                return operator == "is_not" and rval is None
+                return False
             # Compare each one. If one matches the predicate we're good!
             return any((self._compare(field_type, sub_val, operator, rval)) for sub_val in lval)
 
