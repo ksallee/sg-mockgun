@@ -23,7 +23,12 @@ import shotgun_api3
 
 ROOT = Path(__file__).resolve().parent.parent
 ANSWERS = ROOT / "docs" / "api3"
-ENV_FILES = (ROOT / ".env.local", ROOT.parent / "sg-groundtruth" / ".env.local")
+# A worktree under ~/dev/sg-mockgun-wt/<slug> has sg-groundtruth two levels up, not one.
+ENV_FILES = (
+    ROOT / ".env.local",
+    ROOT.parent / "sg-groundtruth" / ".env.local",
+    ROOT.parent.parent / "sg-groundtruth" / ".env.local",
+)
 SECRET_KEYS = ("FPT_API_SITE_URL", "FPT_API_SCRIPT_NAME", "FPT_API_API_KEY")
 
 
@@ -46,7 +51,7 @@ def load_env():
         if path.exists():
             env.update(parse_env(path.read_text()))
             return env
-    raise SystemExit("no .env.local in sg-mockgun or ../sg-groundtruth")
+    raise SystemExit("no .env.local in sg-mockgun or a sibling sg-groundtruth")
 
 
 def need(env, key):

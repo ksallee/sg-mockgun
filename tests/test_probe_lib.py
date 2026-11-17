@@ -28,3 +28,7 @@ def test_ask_returns_the_value_or_the_exception():
 def test_writes_need_the_flag():
     assert lib.writes_allowed(["probe.py", "--write"])
     assert not lib.writes_allowed(["probe.py"])
+
+
+def test_env_lookup_reaches_sg_groundtruth_from_a_worktree():
+    assert lib.ROOT.parent.parent / "sg-groundtruth" / ".env.local" in lib.ENV_FILES
