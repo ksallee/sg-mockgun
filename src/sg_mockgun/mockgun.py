@@ -125,6 +125,16 @@ from .schema import SchemaFactory
 from . import events as _events
 from .fields import CREATABLE_TYPES, UPDATABLE_PROPERTIES, field_code, new_field, ruby_inspect, ruby_list, ruby_params
 
+def _same_link(a, b):
+    """Whether two entity links name the same row."""
+    return a["type"] == b["type"] and a["id"] == b["id"]
+
+
+def _link_name(link):
+    """The display name of an entity link, empty when the linked row has none."""
+    return link.get("name") or ""
+
+
 class FieldReviveError(ShotgunError):
     """A refused field revive. ``status`` is the HTTP status the REST route answers with."""
 
@@ -883,42 +893,80 @@ class Shotgun(object):
             elif operator == "not_in":
                 return lval not in rval
         elif field_type == "entity":
+            # field_types/entity
+            if operator in ("name_is", "name_contains", "name_not_contains") and rval is None:
+                # wording unmeasured; REST answers 400 (sg-groundtruth#109)
+                raise ShotgunError("API read() '%s' 'relation' does not accept a null value" % operator)
+            if operator in ("in", "not_in") and isinstance(rval, dict):
+                rval = [rval]
             if operator == "is":
-                # If one of the two is None, ensure both are.
                 if lval is None or rval is None:
                     return lval == rval
-                # Both values are set, compare them.
                 return lval["type"] == rval["type"] and lval["id"] == rval["id"]
             elif operator == "is_not":
                 if lval is None or rval is None:
                     return lval != rval
-                if rval is None:
-                    # We already know lval is not None, so we know they are not equal.
-                    return True
                 return lval["type"] != rval["type"] or lval["id"] != rval["id"]
+            elif operator == "type_is" and rval is None:
+                return False
+            elif operator == "type_is_not" and rval is None:
+                return True
+            elif lval is None and operator in ("in", "type_is", "name_is", "name_contains"):
+                return False
+            elif lval is None and operator in ("not_in", "type_is_not", "name_not_contains"):
+                # unlinked rows unmeasured on entity (sg-groundtruth#109)
+                return True
             elif operator == "in":
-                return all((lval["type"] == sub_rval["type"] and lval["id"] == sub_rval["id"]) for sub_rval in rval)
+                return any(_same_link(lval, sub_rval) for sub_rval in rval)
+            elif operator == "not_in":
+                return not any(_same_link(lval, sub_rval) for sub_rval in rval)
             elif operator == "type_is":
                 return lval["type"] == rval
             elif operator == "type_is_not":
                 return lval["type"] != rval
+            elif operator == "name_is":
+                return _link_name(lval) == rval
             elif operator == "name_contains":
-                return rval in lval["name"]
+                return rval in _link_name(lval)
             elif operator == "name_not_contains":
-                return rval not in lval["name"]
-            elif operator == "name_starts_with":
-                return lval["name"].startswith(rval)
-            elif operator == "name_ends_with":
-                return lval["name"].endswith(rval)
+                return rval not in _link_name(lval)
         elif field_type == "multi_entity":
+            # field_types/multi_entity
+            if operator == "is" and isinstance(rval, list):
+                if len(rval) != 1:
+                    # REST wording; api3 unprobed (sg-groundtruth#109)
+                    raise ShotgunError(
+                        "API read() 'is' 'relation' expects a 1-element array: %s" % ruby_inspect(rval)
+                    )
+                rval = rval[0]
+            if operator in ("in", "not_in"):
+                if isinstance(rval, dict):
+                    rval = [rval]
+                if not rval:
+                    # REST wording; api3 unprobed (sg-groundtruth#109)
+                    raise ShotgunError(
+                        "API read() '%s' 'relation' expects at least a 1-element array: []" % operator
+                    )
             if operator == "is":
                 if rval is None:
                     return len(lval) == 0
-                return rval["id"] in (sub_lval["id"] for sub_lval in lval)
+                return any(_same_link(sub_lval, rval) for sub_lval in lval)
             elif operator == "is_not":
                 if rval is None:
                     return len(lval) != 0
-                return rval["id"] not in (sub_lval["id"] for sub_lval in lval)
+                return not any(_same_link(sub_lval, rval) for sub_lval in lval)
+            elif operator == "in":
+                return any(_same_link(sub_lval, sub_rval) for sub_lval in lval for sub_rval in rval)
+            elif operator == "not_in":
+                return not any(_same_link(sub_lval, sub_rval) for sub_lval in lval for sub_rval in rval)
+            elif operator == "type_is":
+                return any(sub_lval["type"] == rval for sub_lval in lval)
+            elif operator == "type_is_not":
+                return not any(sub_lval["type"] == rval for sub_lval in lval)
+            elif operator == "name_is":
+                return any(_link_name(sub_lval) == rval for sub_lval in lval)
+            elif operator == "name_contains":
+                return any(rval in _link_name(sub_lval) for sub_lval in lval)
 
         raise ShotgunError("The %s operator is not supported on the %s type" % (operator, field_type))
 
@@ -1009,19 +1057,23 @@ class Shotgun(object):
 
             field_type = self._get_field_type(entity_type, field)
 
-            # if we're operating on an entity, we'll need to grab the name from the lval's row
-            if field_type == "entity":
-                # If the entity field is set, we'll retrieve the name of the entity.
-                if lval is not None:
-                    link_type = lval["type"]
-                    link_id = lval["id"]
-                    lval_row = self._db[link_type][link_id]
-                    if "name" in lval_row:
-                        lval["name"] = lval_row["name"]
-                    elif "code" in lval_row:
-                        lval["name"] = lval_row["code"]
+            # Name operators compare the linked row's name, on copies of the stored links.
+            if field_type == "entity" and isinstance(lval, dict):
+                lval = self._named_link(lval)
+            elif field_type == "multi_entity" and operator.startswith("name_") and isinstance(lval, list):
+                lval = [self._named_link(link) for link in lval]
 
             return self._compare(field_type, lval, operator, rval)
+
+    def _named_link(self, link):
+        """A copy of an entity link with ``name`` set from the linked row's ``name`` or ``code``."""
+        link = dict(link)
+        linked_row = self._db[link["type"]][link["id"]]
+        if "name" in linked_row:
+            link["name"] = linked_row["name"]
+        elif "code" in linked_row:
+            link["name"] = linked_row["code"]
+        return link
 
     def _rearrange_filters(self, filters: list) -> None:
         """
