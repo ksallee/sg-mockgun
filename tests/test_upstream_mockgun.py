@@ -688,7 +688,7 @@ class TestFilterOperator(unittest.TestCase):
             ["login"],
             order=[{"field_name": "created_at", "direction": "asc"}],
         )
-        # api3 025: None sorts last.
+        # api3 038: a new row's created_at is set to now, so user1 sorts after user2's 2025 date.
         self.assertEqual([u["login"] for u in users], ["user2", "user1"])
 
     def test_nested_filter_operators(self):
