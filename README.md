@@ -134,6 +134,25 @@ A seed file lists records per entity type, each with an explicit `id`:
 `sg.snapshot()` copies the records and the schema. `sg.restore(state)` puts them back, as often as
 needed.
 
+## Migrate from shotgun_api3's mockgun
+
+Replace the import:
+
+    # from shotgun_api3.lib import mockgun
+    import sg_mockgun as mockgun
+
+The package exports `Shotgun`, `generate_schema`, `MockgunError` and the submodules `mockgun`,
+`schema` and `errors`, as upstream does. The constructor signature is upstream's.
+
+Differences from upstream:
+
+- `Shotgun` and `MockgunError` are new classes. A `mock.patch` target or an `except` clause naming `shotgun_api3.lib.mockgun` misses them.
+- `set_schema_paths` is per class. Calling it on upstream's `Shotgun` does not configure sg-mockgun's.
+- The event log is on by default. Set `sg.generate_event_log_entries = False` to turn it off.
+- `schema_field_create`, `schema_field_update` and `schema_field_delete` write to the schema instead of raising `NotImplementedError`.
+- Each instance deep-copies the schema. A schema write on one instance does not reach another.
+- `from sg_mockgun import mockgun` returns the submodule, which has no `generate_schema`.
+
 ## Serve
 
     sg-mockgun serve --host 0.0.0.0 --port 8080
