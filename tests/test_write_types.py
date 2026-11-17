@@ -1,6 +1,7 @@
 """Field types on create and update, against the bundled schema."""
 
 import datetime
+import os
 
 import pytest
 from shotgun_api3 import Fault, ShotgunError
@@ -132,8 +133,9 @@ def test_image_string_that_is_not_a_file_raises_after_create(sg, project, tmp_pa
 
 def test_image_string_that_is_not_a_file_raises_on_update(sg, project, tmp_path):
     version = sg.create("Version", {"code": "v", "project": project})
-    with pytest.raises(ShotgunError, match="Path must be a valid file, got '/"):
+    with pytest.raises(ShotgunError) as err:
         sg.update("Version", version["id"], {"image": "https://example.com/a.png"})
+    assert str(err.value) == "Path must be a valid file, got '%s'" % os.path.abspath("https://example.com/a.png")
 
 
 def test_image_file_goes_to_upload_thumbnail(sg, project, tmp_path, monkeypatch):

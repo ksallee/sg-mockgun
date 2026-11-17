@@ -24,9 +24,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python }}
+      # setup-python has no 3.9 build for this runner image. uv installs any version.
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Create a Python ${{ matrix.python }} environment with pip
+        run: |
+          uv venv --seed --python ${{ matrix.python }} "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
 
       - name: Run tk-core's suite
         run: python tools/run_tk_core.py
