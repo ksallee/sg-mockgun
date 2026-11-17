@@ -28,6 +28,7 @@ sg-mockgun follows [Semantic Versioning](https://semver.org/). Numbers are pull 
 ### Task Templates and scheduling
 
 - Task Templates apply on create and on change. Dates reschedule along dependencies. Task delete and revive follow api3 answers 070 to 074 (#55).
+- A template apply lists its Tasks on the entity. Writing a Task's stored `start_date` does not pin it (#65).
 
 ### Other methods
 
@@ -39,6 +40,7 @@ sg-mockgun follows [Semantic Versioning](https://semver.org/). Numbers are pull 
 
 - pytest plugin with the `sg` fixture, JSON seeding, snapshot and restore (#33).
 - Conformance suite scaffold and `docs/coverage.md` (#36).
+- Conformance cells for each api3 area, a live run on a Flow PT 8.91 site, and the coverage table regenerated from both (#65).
 - A mock instance pickles (#40).
 
 ### Compatibility
