@@ -214,6 +214,40 @@ def test_multi_entity_refuses_none(sg, project):
     assert str(err.value) == "API update() Note.tasks expected [Array] data type(s) but got NilClass:\nnil"
 
 
+def playlist_with_three_versions(sg, project):
+    versions = [sg.create("Version", {"code": f"v{i}", "project": project}) for i in (1, 2, 3)]
+    links = [{"type": "Version", "id": v["id"]} for v in versions]
+    playlist = sg.create("Playlist", {"code": "pl", "project": project, "versions": links})
+    return playlist, links
+
+
+def stored_ids(sg, entity, field):
+    return [link["id"] for link in stored(sg, entity, field)]
+
+
+def test_multi_entity_remove_takes_out_every_link_given(sg, project):
+    playlist, (v1, v2, v3) = playlist_with_three_versions(sg, project)
+    sg.update("Playlist", playlist["id"], {"versions": [v1, v2]}, multi_entity_update_modes={"versions": "remove"})
+    assert stored_ids(sg, playlist, "versions") == [v3["id"]]
+
+
+def test_multi_entity_remove_ignores_links_not_on_the_field(sg, project):
+    playlist, (v1, v2, v3) = playlist_with_three_versions(sg, project)
+    other = sg.create("Version", {"code": "other", "project": project})
+    sg.update(
+        "Playlist", playlist["id"],
+        {"versions": [v2, {"type": "Version", "id": other["id"]}]},
+        multi_entity_update_modes={"versions": "remove"},
+    )
+    assert stored_ids(sg, playlist, "versions") == [v1["id"], v3["id"]]
+
+
+def test_multi_entity_remove_with_an_empty_list_keeps_the_field(sg, project):
+    playlist, (v1, v2, v3) = playlist_with_three_versions(sg, project)
+    sg.update("Playlist", playlist["id"], {"versions": []}, multi_entity_update_modes={"versions": "remove"})
+    assert stored_ids(sg, playlist, "versions") == [v1["id"], v2["id"], v3["id"]]
+
+
 # field_types/float, api3 032
 
 

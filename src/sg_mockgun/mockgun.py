@@ -1696,13 +1696,8 @@ class Shotgun(object):
                         if new_item not in row[field]:
                             row[field].append(new_item)
                 elif update_mode == "remove":
-                    row[field] = [
-                        item
-                        for item in row[field]
-                        for new_item in data[field]
-                        if item["id"] != new_item["id"]
-                        or item["type"] != new_item["type"]
-                    ]
+                    removed = {(item["type"], item["id"]) for item in data[field]}
+                    row[field] = [item for item in row[field] if (item["type"], item["id"]) not in removed]
                 elif update_mode == "set":
                     row[field] = [{"type": item["type"], "id": item["id"]} for item in data[field]]
             elif field_type == "text" and isinstance(data[field], str):
